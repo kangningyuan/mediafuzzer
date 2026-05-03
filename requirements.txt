@@ -1,0 +1,23 @@
+# 模糊测试与模拟执行核心
+qiling>=1.4.5
+capstone==4.0.2
+unicorn>=2.0.1
+
+# APK静态分析
+androguard>=4.1.1
+pyelftools>=0.29
+
+# LLM接口
+openai>=1.0.0
+httpx
+
+# 工具与数据处理
+tqdm
+pyyaml
+jsonschema
+python-dotenv
+
+# 测试
+pytest
+pytest-cov
+pytest-timeout
