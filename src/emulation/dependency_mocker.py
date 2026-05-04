@@ -3,7 +3,7 @@
 import logging
 import os
 import struct
-from typing import Any
+from typing import Any, Callable
 
 from config.settings import settings
 from config.file_formats import get_format
@@ -30,6 +30,8 @@ class DependencyMocker:
         self._hook_pthread()
         self._hook_network()
         self._hook_misc()
+        self._hook_syscalls()
+        self._hook_mem_invalid()
         self._patch_plt_got()
 
     def _next_fd(self) -> int:
@@ -218,17 +220,24 @@ class DependencyMocker:
     def _hook_libc_mem(self) -> None:
         """Hook malloc/free/memcpy/memset so unlinked SOs can run."""
         ql = self.ql
-        _heap_next: list[int] = [0x80000000]  # heap base for fake allocations
+
+        # Pre-map a large heap region (64MB) to avoid per-allocation UC_ERR_MAP
+        _heap_base = 0x80000000
+        _heap_size = 64 * 1024 * 1024  # 64 MB
+        try:
+            ql.mem.map(_heap_base, _heap_size, info="fake_heap")
+        except Exception:
+            pass
+        _heap_next: list[int] = [_heap_base]  # next allocation address
 
         def _on_malloc(ql_ref: Any) -> None:
             size = ql_ref.arch.regs.x0
             addr = _heap_next[0]
             _heap_next[0] += (size + 0xF) & ~0xF  # 16-byte aligned
-            # Map the memory region
-            try:
-                ql_ref.mem.map(addr, (size + 0xFFF) & ~0xFFF, info="fake_malloc")
-            except Exception:
-                pass
+            # Check heap bounds
+            if _heap_next[0] > _heap_base + _heap_size:
+                ql_ref.arch.regs.x0 = 0  # out of memory
+                return
             ql_ref.arch.regs.x0 = addr
 
         def _on_free(ql_ref: Any) -> None:
@@ -269,13 +278,17 @@ class DependencyMocker:
             self.hook_manager.register_hook(name, handler, "dependency")
 
     def _patch_plt_got(self) -> None:
-        """Patch unresolved PLT symbols using a hook_code interceptor.
+        """Patch PLT symbols using hook_address per entry.
 
-        Scans the SO's .rela.plt for GOT entries that are zero (unresolved).
-        Collects the PLT entry addresses for each symbol and installs a single
-        hook_code callback that intercepts calls to those PLT entries, runs
-        the registered Python handler, and redirects PC to the caller's return
-        address (LR/x30) to simulate the function returning.
+        Scans the SO's .rela.plt and installs a hook_address callback for
+        each PLT entry that doesn't have a real implementation. When the
+        PLT stub is reached, the hook runs the registered Python handler
+        (or a default "return 0" handler) and redirects PC to LR (x30)
+        to simulate the function returning.
+
+        Qiling pre-fills all GOT entries with the lazy resolver stub address,
+        so we intercept ALL PLT entries (not just zero-GOT ones) and check
+        at hook time whether the symbol has a real implementation.
         """
         ql = self.ql
         try:
@@ -309,10 +322,6 @@ class DependencyMocker:
                     got_to_sym[rel.entry.r_offset] = sym.name
 
                 # Map PLT entries to symbols by matching GOT offsets
-                # PLT layout on aarch64: entry 0 is resolver, entries 1..N are stubs
-                # Each stub loads from its GOT slot and branches.
-                # We reverse-match by scanning PLT code for ADRP+LDR pairs.
-                # Simpler: just map PLT entry index to the relocation order.
                 plt_offset = plt_sec.header.sh_addr
                 plt_entry_size = 16  # standard aarch64 PLT entry size
                 got_offsets = sorted(got_to_sym.keys())
@@ -324,46 +333,34 @@ class DependencyMocker:
             if not plt_addr:
                 return
 
-            # Build reverse map: symbol name -> handler
+            # Pre-collect specific handlers
             sym_handlers: dict[str, Any] = {}
             for addr, name in plt_addr.items():
                 handler = self.hook_manager.get_hook(name)
                 if handler is not None:
                     sym_handlers[name] = handler
-                else:
-                    logger.debug("No handler for unresolved PLT symbol: %s", name)
 
-            if not sym_handlers:
-                return
-
-            # Filter to only PLT entries that have handlers and are unresolved
-            target_addrs = set()
+            # Install hook_address for ALL PLT entries
+            hooked_count = 0
             for addr, name in plt_addr.items():
-                if name in sym_handlers:
-                    # Check if GOT entry is zero
-                    got_off = [k for k, v in got_to_sym.items() if v == name][0]
-                    got_addr = base + got_off
-                    got_val = int.from_bytes(ql.mem.read(got_addr, 8), "little")
-                    if got_val == 0:
-                        target_addrs.add(addr)
-                        logger.debug("Will intercept PLT: %s at 0x%x", name, addr)
-
-            if not target_addrs:
-                return
-
-            # Install hook_code interceptor
-            def _plt_interceptor(ql_ref: Any, addr: int, size: int) -> None:
-                if addr not in target_addrs:
-                    return
-                name = plt_addr[addr]
                 handler = sym_handlers.get(name)
-                if handler is not None:
-                    handler(ql_ref)
-                    # Redirect PC to return address (simulate function return)
-                    ql_ref.arch.regs.pc = ql_ref.arch.regs.x30
 
-            ql.hook_code(_plt_interceptor)
-            logger.debug("PLT interceptor installed for %d symbols", len(target_addrs))
+                def _make_plt_hook(sym_name: str, sym_handler: Any | None) -> Callable:
+                    def _on_plt(ql_ref: Any) -> None:
+                        if sym_handler is not None:
+                            sym_handler(ql_ref)
+                        else:
+                            # Default: return 0 for unhandled C++/system symbols
+                            ql_ref.arch.regs.x0 = 0
+                        # Redirect PC to return address (simulate function return)
+                        ql_ref.arch.regs.pc = ql_ref.arch.regs.x30
+                    return _on_plt
+
+                ql.hook_address(_make_plt_hook(name, handler), addr)
+                hooked_count += 1
+
+            logger.debug("PLT hooks installed for %d/%d symbols (%d with handlers)",
+                        hooked_count, len(plt_addr), len(sym_handlers))
 
         except Exception as e:
             logger.debug("PLT GOT patching failed (non-fatal): %s", e)
@@ -389,3 +386,52 @@ class DependencyMocker:
                 except Exception:
                     pass
             self.hook_manager.register_hook(name, handler, "dependency")
+
+    def _hook_syscalls(self) -> None:
+        """Hook ARM64 SVC instructions (Linux syscalls).
+
+        Many native functions issue syscalls directly (clock_gettime,
+        gettid, futex, etc.) that Qiling's Linux emulation doesn't handle.
+        Intercept unhandled interrupts and return success (0) by default.
+        """
+        ql = self.ql
+
+        def _on_intr(ql_ref: Any, intno: int) -> None:
+            # Return 0 (success) for any unhandled syscall/interrupt
+            ql_ref.arch.regs.x0 = 0
+
+        ql.hook_intr(_on_intr)
+
+    def _hook_mem_invalid(self) -> None:
+        """Hook invalid memory accesses to prevent UC_ERR_FETCH_UNMAPPED crashes.
+
+        When execution jumps to an unmapped address (e.g., a vtable or function
+        pointer that we couldn't resolve), redirect to the return address instead
+        of crashing the entire emulation. For read/write to unmapped memory,
+        auto-map the page so execution can continue.
+        """
+        ql = self.ql
+
+        def _on_mem_invalid(ql_ref: Any, access: int, addr: int, size: int, value: int) -> bool:
+            # UC_MEM_FETCH_UNMAPPED = 21 in unicorn-engine
+            if access == 21:  # UC_MEM_FETCH_UNMAPPED
+                # Redirect to return address with x0=0 (safe default)
+                ql_ref.arch.regs.pc = ql_ref.arch.regs.x30
+                ql_ref.arch.regs.x0 = 0
+                return True
+            # For read/write unmapped, try to map the page
+            try:
+                page_base = addr & ~0xFFF
+                # Check if page is already mapped
+                mapped = False
+                for start, end, _, _ in ql_ref.mem.get_mapinfo():
+                    if start <= page_base < end:
+                        mapped = True
+                        break
+                if not mapped:
+                    ql_ref.mem.map(page_base, 0x1000, info="auto_mapped")
+            except Exception:
+                pass
+            return True  # Continue execution
+
+        ql.hook_mem_invalid(_on_mem_invalid)

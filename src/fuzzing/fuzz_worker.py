@@ -156,25 +156,24 @@ class FuzzWorker:
             # Mutate
             mutated = self.mutator.mutate(parent, max_size=self.mutator.skeleton.max_seed_size if self.mutator.skeleton else 4096)
 
-            # Save previous coverage state
+            # Save previous coverage state (for new-edge detection)
             prev_bitmap = bytearray(self.coverage.bitmap) if self.coverage else bytearray()
-
-            # Reset coverage for this run
-            if self.coverage:
-                self.coverage.reset()
 
             # Execute
             try:
                 ret = self.emulated_func.call_function(bytes(mutated))
 
-                # Check for crash (return -1 indicates error/timeout)
+                # Check for crash — only record genuine crashes (ret < -1),
+                # not emulation infrastructure issues (ret == -1)
                 if ret == -1:
-                    self._record_crash(mutated, "execution_error")
+                    # Emulation error/timeout — not a real crash
+                    pass
                 elif ret < -1:
                     self._record_crash(mutated, "crash")
 
             except Exception as e:
-                self._record_crash(mutated, f"exception: {e}")
+                # Emulation exceptions are infrastructure issues, not security crashes
+                logger.debug("Emulation exception (not a crash): %s", e)
 
             # Check for new coverage
             if self.coverage:

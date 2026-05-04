@@ -17,6 +17,8 @@ env/
 
 # Input APK files
 apk/
+apk_backup/
+apk_backup2/
 
 # Qiling rootfs — only 2.3MB, tracked in git so clone-and-run works
 # If you switch to the larger arm64_android6.0 variant (~50MB+), re-add:
@@ -24,6 +26,7 @@ apk/
 
 # Pipeline output (reports, logs, SO cache, fuzz results)
 output/
+output_test/
 data/
 
 # Test compiled artifacts (rebuild from .c sources)

@@ -57,34 +57,259 @@ class JNIPorter:
         return self._env_ptr_addr
 
     def _setup_jni_stubs(self) -> None:
-        """Register JNI function stubs in the vtable."""
+        """Register JNI function stubs in the vtable.
+
+        All 232 slots must be populated to prevent branch-to-zero crashes.
+        Slots without a specific return value get a default safe stub.
+        See jni.h JNINativeInterface_ for the full table.
+        """
         ql = self.ql
 
         # JNI function index -> (name, return_value)
-        # See jni.h for the full JNINativeInterface_ table
+        # Specific return values for commonly-called functions
         jni_functions = {
-            4: ("GetVersion", 0x00010006),      # JNI 1.6
-            6: ("FindClass", 0x1),              # non-NULL jclass
-            27: ("NewStringUTF", 0x2),          # non-NULL jstring
-            28: ("GetStringUTFLength", 0),      # length 0
-            29: ("GetStringUTFChars", 0x3),     # non-NULL
-            30: ("ReleaseStringUTFChars", 0),   # void
-            36: ("GetArrayLength", 0),          # length 0
-            37: ("NewObjectArray", 0x4),        # non-NULL
-            41: ("GetObjectArrayElement", 0x5), # non-NULL
-            171: ("GetByteArrayElements", 0x6), # non-NULL
-            184: ("ReleaseByteArrayElements", 0),  # void
-            200: ("GetByteArrayRegion", 0),     # void
-            207: ("NewByteArray", 0x7),         # non-NULL
+            4: ("GetVersion", 0x00010006),          # JNI 1.6
+            6: ("FindClass", 0x1),                  # non-NULL jclass
+            7: ("FromReflectedMethod", 0),           # NULL jmethodID
+            8: ("FromReflectedField", 0),            # NULL jfieldID
+            9: ("ToReflectedMethod", 0),             # NULL jobject
+            10: ("GetSuperclass", 0x1),              # non-NULL jclass
+            11: ("IsAssignableFrom", 0),             # JNI_FALSE
+            12: ("ToReflectedField", 0),             # NULL jobject
+            13: ("Throw", 0),                       # 0 = success
+            14: ("ThrowNew", 0),                    # 0 = success
+            15: ("ExceptionOccurred", 0),            # NULL jthrowable
+            16: ("ExceptionDescribe", 0),            # void
+            17: ("ExceptionClear", 0),               # void
+            18: ("FatalError", 0),                  # void (noreturn in real JNI)
+            19: ("PushLocalFrame", 0),               # 0 = success
+            20: ("PopLocalFrame", 0),                # NULL jobject
+            21: ("NewGlobalRef", 0x1),              # non-NULL
+            22: ("DeleteGlobalRef", 0),              # void
+            23: ("DeleteLocalRef", 0),               # void
+            24: ("IsSameObject", 0),                # JNI_FALSE
+            25: ("NewLocalRef", 0x1),               # non-NULL
+            26: ("EnsureLocalCapacity", 0),          # 0 = success
+            27: ("NewStringUTF", 0x2),              # non-NULL jstring
+            28: ("GetStringUTFLength", 0),          # length 0
+            29: ("GetStringUTFChars", 0x3),         # non-NULL
+            30: ("ReleaseStringUTFChars", 0),       # void
+            31: ("NewString", 0x2),                 # non-NULL jstring
+            32: ("GetStringLength", 0),              # length 0
+            33: ("GetStringChars", 0x3),            # non-NULL
+            34: ("ReleaseStringChars", 0),          # void
+            35: ("NewStringRegion", 0),              # void
+            36: ("GetArrayLength", 0),              # length 0
+            37: ("NewObjectArray", 0x4),            # non-NULL
+            38: ("GetObjectArrayElement", 0x5),     # non-NULL
+            39: ("SetObjectArrayElement", 0),       # void
+            40: ("NewBooleanArray", 0x1),           # non-NULL
+            41: ("NewByteArray", 0x7),              # non-NULL
+            42: ("NewCharArray", 0x1),              # non-NULL
+            43: ("NewShortArray", 0x1),             # non-NULL
+            44: ("NewIntArray", 0x1),               # non-NULL
+            45: ("NewLongArray", 0x1),              # non-NULL
+            46: ("NewFloatArray", 0x1),             # non-NULL
+            47: ("NewDoubleArray", 0x1),            # non-NULL
+            48: ("GetBooleanArrayElements", 0x6),   # non-NULL
+            49: ("GetByteArrayElements", 0x6),      # non-NULL
+            50: ("GetCharArrayElements", 0x6),      # non-NULL
+            51: ("GetShortArrayElements", 0x6),     # non-NULL
+            52: ("GetIntArrayElements", 0x6),       # non-NULL
+            53: ("GetLongArrayElements", 0x6),      # non-NULL
+            54: ("GetFloatArrayElements", 0x6),     # non-NULL
+            55: ("GetDoubleArrayElements", 0x6),    # non-NULL
+            56: ("ReleaseBooleanArrayElements", 0),  # void
+            57: ("ReleaseByteArrayElements", 0),     # void
+            58: ("ReleaseCharArrayElements", 0),     # void
+            59: ("ReleaseShortArrayElements", 0),    # void
+            60: ("ReleaseIntArrayElements", 0),      # void
+            61: ("ReleaseLongArrayElements", 0),     # void
+            62: ("ReleaseFloatArrayElements", 0),    # void
+            63: ("ReleaseDoubleArrayElements", 0),   # void
+            64: ("GetBooleanArrayRegion", 0),        # void
+            65: ("GetByteArrayRegion", 0),           # void
+            66: ("GetCharArrayRegion", 0),           # void
+            67: ("GetShortArrayRegion", 0),          # void
+            68: ("GetIntArrayRegion", 0),            # void
+            69: ("GetLongArrayRegion", 0),           # void
+            70: ("GetFloatArrayRegion", 0),          # void
+            71: ("GetDoubleArrayRegion", 0),         # void
+            72: ("SetBooleanArrayRegion", 0),        # void
+            73: ("SetByteArrayRegion", 0),           # void
+            74: ("SetCharArrayRegion", 0),           # void
+            75: ("SetShortArrayRegion", 0),          # void
+            76: ("SetIntArrayRegion", 0),            # void
+            77: ("SetLongArrayRegion", 0),           # void
+            78: ("SetFloatArrayRegion", 0),          # void
+            79: ("SetDoubleArrayRegion", 0),         # void
+            80: ("RegisterNatives", 0),              # 0 = success
+            81: ("UnregisterNatives", 0),            # 0 = success
+            82: ("MonitorEnter", 0),                 # 0 = success
+            83: ("MonitorExit", 0),                  # 0 = success
+            84: ("GetJavaVM", 0x1),                 # non-NULL
+            85: ("GetStringRegion", 0),              # void
+            86: ("GetStringUTFRegion", 0),           # void
+            87: ("GetPrimitiveArrayCritical", 0x6),  # non-NULL
+            88: ("ReleasePrimitiveArrayCritical", 0), # void
+            89: ("GetStringCritical", 0x3),          # non-NULL
+            90: ("ReleaseStringCritical", 0),        # void
+            91: ("NewWeakGlobalRef", 0x1),          # non-NULL
+            92: ("DeleteWeakGlobalRef", 0),          # void
+            93: ("ExceptionCheck", 0),              # JNI_FALSE
+            94: ("NewDirectByteBuffer", 0x1),       # non-NULL
+            95: ("GetDirectBufferAddress", 0x1),    # non-NULL
+            96: ("GetDirectBufferCapacity", 0),     # 0
+            97: ("GetObjectClass", 0x1),            # non-NULL jclass
+            98: ("IsInstanceOf", 0),                # JNI_FALSE
+            99: ("GetMethodID", 0x1),              # non-NULL jmethodID
+            100: ("GetObjectField", 0),             # NULL jobject
+            101: ("GetBooleanField", 0),            # JNI_FALSE
+            102: ("GetByteField", 0),               # 0
+            103: ("GetCharField", 0),               # 0
+            104: ("GetShortField", 0),              # 0
+            105: ("GetIntField", 0),                # 0
+            106: ("GetLongField", 0),               # 0
+            107: ("GetFloatField", 0),              # 0.0
+            108: ("GetDoubleField", 0),             # 0.0
+            109: ("SetObjectField", 0),             # void
+            110: ("SetBooleanField", 0),            # void
+            111: ("SetByteField", 0),               # void
+            112: ("SetCharField", 0),               # void
+            113: ("SetShortField", 0),              # void
+            114: ("SetIntField", 0),                # void
+            115: ("SetLongField", 0),               # void
+            116: ("SetFloatField", 0),              # void
+            117: ("SetDoubleField", 0),             # void
+            118: ("GetStaticMethodID", 0x1),       # non-NULL
+            119: ("CallStaticObjectMethod", 0),     # NULL
+            120: ("CallStaticObjectMethodV", 0),    # NULL
+            121: ("CallStaticObjectMethodA", 0),    # NULL
+            122: ("CallStaticBooleanMethod", 0),    # JNI_FALSE
+            123: ("CallStaticBooleanMethodV", 0),   # JNI_FALSE
+            124: ("CallStaticBooleanMethodA", 0),   # JNI_FALSE
+            125: ("CallStaticByteMethod", 0),       # 0
+            126: ("CallStaticByteMethodV", 0),      # 0
+            127: ("CallStaticByteMethodA", 0),      # 0
+            128: ("CallStaticCharMethod", 0),       # 0
+            129: ("CallStaticCharMethodV", 0),      # 0
+            130: ("CallStaticCharMethodA", 0),      # 0
+            131: ("CallStaticShortMethod", 0),      # 0
+            132: ("CallStaticShortMethodV", 0),     # 0
+            133: ("CallStaticShortMethodA", 0),     # 0
+            134: ("CallStaticIntMethod", 0),        # 0
+            135: ("CallStaticIntMethodV", 0),       # 0
+            136: ("CallStaticIntMethodA", 0),       # 0
+            137: ("CallStaticLongMethod", 0),       # 0
+            138: ("CallStaticLongMethodV", 0),      # 0
+            139: ("CallStaticLongMethodA", 0),      # 0
+            140: ("CallStaticFloatMethod", 0),      # 0.0
+            141: ("CallStaticFloatMethodV", 0),     # 0.0
+            142: ("CallStaticFloatMethodA", 0),     # 0.0
+            143: ("CallStaticDoubleMethod", 0),     # 0.0
+            144: ("CallStaticDoubleMethodV", 0),    # 0.0
+            145: ("CallStaticDoubleMethodA", 0),    # 0.0
+            146: ("CallStaticVoidMethod", 0),       # void
+            147: ("CallStaticVoidMethodV", 0),      # void
+            148: ("CallStaticVoidMethodA", 0),      # void
+            149: ("GetStaticObjectField", 0),       # NULL
+            150: ("GetStaticBooleanField", 0),      # JNI_FALSE
+            151: ("GetStaticByteField", 0),         # 0
+            152: ("GetStaticCharField", 0),         # 0
+            153: ("GetStaticShortField", 0),        # 0
+            154: ("GetStaticIntField", 0),          # 0
+            155: ("GetStaticLongField", 0),         # 0
+            156: ("GetStaticFloatField", 0),        # 0.0
+            157: ("GetStaticDoubleField", 0),       # 0.0
+            158: ("SetStaticObjectField", 0),       # void
+            159: ("SetStaticBooleanField", 0),      # void
+            160: ("SetStaticByteField", 0),         # void
+            161: ("SetStaticCharField", 0),         # void
+            162: ("SetStaticShortField", 0),        # void
+            163: ("SetStaticIntField", 0),          # void
+            164: ("SetStaticLongField", 0),         # void
+            165: ("SetStaticFloatField", 0),        # void
+            166: ("SetStaticDoubleField", 0),       # void
+            167: ("NewString", 0x2),               # non-NULL (alternate slot)
+            168: ("GetStringLength", 0),            # 0
+            169: ("GetStringChars", 0x3),           # non-NULL
+            170: ("ReleaseStringChars", 0),         # void
+            171: ("GetByteArrayElements", 0x6),     # non-NULL
+            172: ("GetBooleanArrayElements", 0x6),  # non-NULL
+            173: ("GetShortArrayElements", 0x6),    # non-NULL
+            174: ("GetIntArrayElements", 0x6),      # non-NULL
+            175: ("GetLongArrayElements", 0x6),     # non-NULL
+            176: ("GetFloatArrayElements", 0x6),    # non-NULL
+            177: ("GetDoubleArrayElements", 0x6),   # non-NULL
+            178: ("ReleaseBooleanArrayElements", 0), # void
+            179: ("ReleaseByteArrayElements", 0),    # void
+            180: ("ReleaseCharArrayElements", 0),    # void
+            181: ("ReleaseShortArrayElements", 0),   # void
+            182: ("ReleaseIntArrayElements", 0),     # void
+            183: ("ReleaseLongArrayElements", 0),    # void
+            184: ("ReleaseFloatArrayElements", 0),   # void
+            185: ("ReleaseDoubleArrayElements", 0),  # void
+            186: ("GetBooleanArrayRegion", 0),       # void
+            187: ("GetByteArrayRegion", 0),          # void
+            188: ("GetCharArrayRegion", 0),          # void
+            189: ("GetShortArrayRegion", 0),         # void
+            190: ("GetIntArrayRegion", 0),           # void
+            191: ("GetLongArrayRegion", 0),          # void
+            192: ("GetFloatArrayRegion", 0),         # void
+            193: ("GetDoubleArrayRegion", 0),        # void
+            194: ("SetBooleanArrayRegion", 0),       # void
+            195: ("SetByteArrayRegion", 0),          # void
+            196: ("SetCharArrayRegion", 0),          # void
+            197: ("SetShortArrayRegion", 0),         # void
+            198: ("SetIntArrayRegion", 0),           # void
+            199: ("SetLongArrayRegion", 0),          # void
+            200: ("SetFloatArrayRegion", 0),         # void
+            201: ("SetDoubleArrayRegion", 0),        # void
+            202: ("RegisterNatives", 0),             # 0 = success
+            203: ("UnregisterNatives", 0),           # 0 = success
+            204: ("MonitorEnter", 0),                # 0 = success
+            205: ("MonitorExit", 0),                 # 0 = success
+            206: ("GetJavaVM", 0x1),                # non-NULL
+            207: ("NewByteArray", 0x7),             # non-NULL
+            208: ("GetObjectClass", 0x1),           # non-NULL
+            209: ("IsInstanceOf", 0),               # JNI_FALSE
+            210: ("GetMethodID", 0x1),             # non-NULL
+            211: ("GetObjectField", 0),             # NULL
+            212: ("GetBooleanField", 0),            # JNI_FALSE
+            213: ("GetByteField", 0),               # 0
+            214: ("GetCharField", 0),               # 0
+            215: ("GetShortField", 0),             # 0
+            216: ("GetIntField", 0),               # 0
+            217: ("GetLongField", 0),              # 0
+            218: ("GetFloatField", 0),             # 0.0
+            219: ("GetDoubleField", 0),            # 0.0
+            220: ("SetObjectField", 0),            # void
+            221: ("SetBooleanField", 0),           # void
+            222: ("SetByteField", 0),              # void
+            223: ("SetCharField", 0),              # void
+            224: ("SetShortField", 0),             # void
+            225: ("SetIntField", 0),               # void
+            226: ("SetLongField", 0),              # void
+            227: ("SetFloatField", 0),             # void
+            228: ("SetDoubleField", 0),            # void
+            229: ("GetStaticMethodID", 0x1),      # non-NULL
+            230: ("ExceptionCheck", 0),            # JNI_FALSE
+            231: ("NewDirectByteBuffer", 0x1),    # non-NULL
         }
 
+        # First, create a universal default stub (returns 0) for ALL slots
+        default_stub = self._asm_stub_return(0)
+        for idx in range(self.VTABLE_SLOTS):
+            ql.mem.write(self._vtable_addr + idx * 8, struct.pack("<Q", default_stub))
+
+        # Then overwrite specific slots with tailored return values
         for idx, (name, ret_val) in jni_functions.items():
+            if idx >= self.VTABLE_SLOTS:
+                continue
             stub_addr = self._asm_stub_return(ret_val)
-            # Write stub address into vtable slot
             offset = idx * 8
             ql.mem.write(self._vtable_addr + offset, struct.pack("<Q", stub_addr))
 
-            # Register address hook for the stub
             def _make_handler(func_name: str) -> Callable:
                 def handler(ql_ref: Any) -> None:
                     logger.debug("JNI stub called: %s", func_name)
@@ -315,7 +540,7 @@ class EmulatedJNIFunc:
         except Exception as e:
             logger.warning("SO init failed (non-fatal): %s", e)
 
-    def call_function(self, input_data: bytes, timeout_ms: int | None = None) -> int:
+    def call_function(self, input_data: bytes, timeout_us: int | None = None) -> int:
         """Execute the target function with input_data.
 
         Sets ARM64 registers:
@@ -329,7 +554,7 @@ class EmulatedJNIFunc:
             raise RuntimeError("EmulatedJNIFunc not initialized")
 
         ql = self.ql
-        timeout = timeout_ms or settings.QL_TIMEOUT
+        timeout = timeout_us or settings.QL_TIMEOUT
 
         # Map input data into emulated memory
         input_size = max(len(input_data), 1)
@@ -342,12 +567,21 @@ class EmulatedJNIFunc:
         ret_code = struct.pack("<I", 0xD65F03C0)  # ARM64 RET
         ql.mem.write(self._return_addr, ret_code)
 
+        # Allocate a fresh stack for this invocation (1MB, 16-byte aligned)
+        stack_size = 1024 * 1024  # 1 MB
+        stack_base = ql.mem.map_anywhere(stack_size, info="fuzz_stack")
+        # ARM64 SP must be 16-byte aligned; set SP near top of stack region
+        stack_top = stack_base + stack_size - 16
+        # Align down to 16 bytes
+        stack_top = stack_top & ~0xF
+
         # Set ARM64 registers per calling convention
+        ql.arch.regs.sp = stack_top
         ql.arch.regs.x0 = self.jni_porter.env_ptr_addr if self.jni_porter else 0
         ql.arch.regs.x1 = 0  # jobject = NULL
         ql.arch.regs.x2 = self._input_addr
         ql.arch.regs.x3 = len(input_data)
-        ql.arch.regs.x29 = 0  # Frame pointer
+        ql.arch.regs.x29 = stack_top  # Frame pointer = SP
         ql.arch.regs.x30 = self._return_addr  # Link register -> return
 
         # Set up return address hook
@@ -367,7 +601,12 @@ class EmulatedJNIFunc:
             )
         except Exception as e:
             exception_occurred[0] = e
-            logger.warning("Execution exception: %s", e)
+            err_str = str(e)
+            # Infrastructure errors (MAP, FETCH) are expected in emulation
+            if "UC_ERR_MAP" in err_str or "UC_ERR_FETCH" in err_str:
+                logger.debug("Execution exception (infrastructure): %s", e)
+            else:
+                logger.warning("Execution exception: %s", e)
 
         # Read return value
         ret_val = -1
@@ -377,16 +616,19 @@ class EmulatedJNIFunc:
             except Exception:
                 pass
         elif exception_occurred[0]:
-            logger.warning("Function did not return normally: %s", exception_occurred[0])
+            err_str = str(exception_occurred[0])
+            if "UC_ERR_MAP" not in err_str and "UC_ERR_FETCH" not in err_str:
+                logger.warning("Function did not return normally: %s", exception_occurred[0])
             ret_val = -1
         else:
-            logger.warning("Function execution timed out after %dms", timeout)
+            logger.warning("Function execution timed out after %.1fs", timeout / 1_000_000)
             ret_val = -1
 
         # Clean up mapped memory
         try:
             ql.mem.unmap(self._input_addr, input_size)
             ql.mem.unmap(self._return_addr, 4)
+            ql.mem.unmap(stack_base, stack_size)
         except Exception:
             pass
 

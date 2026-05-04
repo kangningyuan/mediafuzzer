@@ -24,7 +24,7 @@ class _Settings:
     QL_ARCH: str = "arm64"
     QL_OS: str = "linux"
     QL_VERBOSE: int = 0
-    QL_TIMEOUT: int = 5000  # ms
+    QL_TIMEOUT: int = 500000  # microseconds (500ms per execution)
 
     # APK / SO paths
     APK_INPUT_DIR: str = str(_PROJECT_ROOT / "data" / "apks")

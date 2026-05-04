@@ -21,7 +21,7 @@ from typing import Any
 
 from config.settings import settings, load_settings
 from src.apk_io.extractor import extract_so_files, get_apk_package_name, list_apk_files
-from src.apk_io.static_analyzer import extract_all, JNISignature
+from src.apk_io.static_analyzer import extract_all, JNISignature, JNIParam
 from src.llm_interface.querier import LLMQuerier, filter_multimedia_functions, MultimediaFuncInfo
 from src.fuzzing.fuzz_worker import FuzzWorker, FuzzResult
 from src.reporter.crash_aggregator import CrashAggregator
@@ -249,6 +249,20 @@ def run_pipeline(config: PipelineConfig) -> str:
         })
     else:
         logger.info("Skipping APK preprocessing (checkpoint found)")
+        # Load signatures from checkpoint file
+        try:
+            with open(checkpoint["signatures"]) as f:
+                raw = json.load(f)
+            for apk_path, sigs in raw.items():
+                loaded_sigs = []
+                for s in sigs:
+                    # Convert params dicts to JNIParam objects if present
+                    if "params" in s and isinstance(s["params"], list):
+                        s["params"] = [JNIParam(**p) for p in s["params"]]
+                    loaded_sigs.append(JNISignature(**s))
+                all_signatures[apk_path] = loaded_sigs
+        except Exception as e:
+            logger.warning("Failed to load signatures from checkpoint: %s", e)
 
     # Flatten all signatures
     flat_signatures: list[JNISignature] = []
@@ -287,6 +301,33 @@ def run_pipeline(config: PipelineConfig) -> str:
         })
     else:
         logger.info("Skipping LLM filtering (checkpoint found)")
+        # Load multimedia functions from checkpoint file
+        try:
+            with open(checkpoint["multimedia_funcs"]) as f:
+                raw = json.load(f)
+            for item in raw:
+                # Derive class_name and method_name from java_full_sig
+                full_sig = item.get("java_full_sig", "")
+                if "." in full_sig:
+                    class_name, method_name = full_sig.rsplit(".", 1)
+                else:
+                    class_name, method_name = full_sig, ""
+                sig = JNISignature(
+                    java_full_sig=full_sig,
+                    native_symbol=item.get("native_symbol", ""),
+                    class_name=class_name,
+                    method_name=method_name,
+                    so_path=item.get("so_path", ""),
+                )
+                multimedia_funcs.append(MultimediaFuncInfo(
+                    jni_signature=sig,
+                    is_multimedia=item.get("is_multimedia", True),
+                    operation_type=item.get("operation_type", "other"),
+                    file_format=item.get("file_format", "UNKNOWN"),
+                    confidence=item.get("confidence", 0.5),
+                ))
+        except Exception as e:
+            logger.warning("Failed to load multimedia functions from checkpoint: %s", e)
 
     logger.info("Multimedia functions to fuzz: %d", len(multimedia_funcs))
 
