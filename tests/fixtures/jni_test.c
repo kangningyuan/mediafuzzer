@@ -1,7 +1,9 @@
 /* JNI test SO: uses JNI functions and memory allocation */
 
-#include <stdlib.h>
-#include <string.h>
+/* Declarations for standalone cross-compilation (resolved at runtime by Qiling/rootfs) */
+void* malloc(unsigned long);
+void free(void*);
+void* memcpy(void*, const void*, unsigned long);
 
 /* Simulated JNI types for standalone compilation */
 typedef void* JNIEnv;
@@ -32,7 +34,7 @@ jint Java_com_test_JniProcessor_processData(
     JNIEnv* env, jobject obj, jbyteArray data, jint len
 ) {
     jint array_len = GetArrayLength(env, data);
-    jbyte* bytes = GetByteArrayElements(env, data, NULL);
+    jbyte* bytes = GetByteArrayElements(env, data, (jint*)0);
 
     jbyte* buf = (jbyte*)malloc(64);
     if (buf && bytes && len <= 64) {

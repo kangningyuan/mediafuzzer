@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables (contains API keys)
+.env
+
+# Input APK files
+apk/
+
+# Qiling rootfs — only 2.3MB, tracked in git so clone-and-run works
+# If you switch to the larger arm64_android6.0 variant (~50MB+), re-add:
+# rootfs/
+
+# Pipeline output (reports, logs, SO cache, fuzz results)
+output/
+data/
+
+# Test compiled artifacts (rebuild from .c sources)
+tests/fixtures/*.so
+
+# IDE and tool caches
+.pytest_cache/
+.claude/
+.mypy_cache/
+.vscode/
+.idea/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# API credentials
+LLM_api_info.txt

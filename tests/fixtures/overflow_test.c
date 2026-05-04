@@ -1,7 +1,9 @@
 /* CWE-122 test: heap buffer overflow */
 
-#include <stdlib.h>
-#include <string.h>
+/* Declarations for standalone cross-compilation (resolved at runtime by Qiling/rootfs) */
+void* malloc(unsigned long);
+void free(void*);
+void* memcpy(void*, const void*, unsigned long);
 
 /* Vulnerable: copies input without checking buffer size */
 int vulnerable_copy(const unsigned char* input, int len) {

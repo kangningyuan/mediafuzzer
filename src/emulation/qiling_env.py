@@ -234,8 +234,8 @@ class EmulatedJNIFunc:
         )
 
     def _resolve_function_address(self) -> None:
-        """Resolve function address from Qiling loader symbols."""
-        # Try to find symbol in loaded SO
+        """Resolve function address from Qiling loader symbols or ELF parsing."""
+        # Try Qiling loader APIs first (works on some Qiling versions)
         try:
             symbols = self.ql.loader.symbols
             for sym in symbols:
@@ -245,7 +245,6 @@ class EmulatedJNIFunc:
         except Exception:
             pass
 
-        # Fallback: check ql.loader.export_symbols
         if not self._func_addr:
             try:
                 for name, addr in self.ql.loader.export_symbols.items():
@@ -255,10 +254,35 @@ class EmulatedJNIFunc:
             except Exception:
                 pass
 
+        # Fallback: parse ELF with pyelftools, compute runtime address from base
+        if not self._func_addr:
+            self._func_addr = self._resolve_via_elf()
+
         if not self._func_addr:
             raise RuntimeError(
                 f"Symbol '{self.func_symbol}' not found in {self.so_path}"
             )
+
+    def _resolve_via_elf(self) -> int:
+        """Resolve symbol by parsing ELF file and adding Qiling loader base."""
+        try:
+            from elftools.elf.elffile import ELFFile  # type: ignore[import-untyped]
+
+            with open(self.so_path, "rb") as f:
+                elf = ELFFile(f)
+                sym_tab = elf.get_section_by_name(".dynsym")
+                if sym_tab is None:
+                    return 0
+                for sym in sym_tab.iter_symbols():
+                    if sym.name == self.func_symbol and sym.entry.st_shndx != "SHN_UNDEF":
+                        # Get the load base from Qiling's first image
+                        base = 0
+                        if self.ql.loader.images:
+                            base = self.ql.loader.images[0].base
+                        return base + sym.entry.st_value
+        except Exception as e:
+            logger.debug("ELF resolution failed: %s", e)
+        return 0
 
     def _run_init(self) -> None:
         """Execute SO initialization (.init_array functions, JNI_OnLoad)."""
@@ -273,6 +297,13 @@ class EmulatedJNIFunc:
                         break
             except Exception:
                 pass
+
+            # Fallback: resolve JNI_OnLoad via ELF
+            if not jni_onload:
+                saved = self.func_symbol
+                self.func_symbol = "JNI_OnLoad"
+                jni_onload = self._resolve_via_elf()
+                self.func_symbol = saved
 
             if jni_onload:
                 logger.debug("Calling JNI_OnLoad at 0x%x", jni_onload)

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import struct
 from typing import Any
 
 from config.settings import settings
@@ -23,11 +24,13 @@ class DependencyMocker:
 
     def setup_all(self) -> None:
         """Register all dependency hooks."""
+        self._hook_libc_mem()
         self._hook_file_io()
         self._hook_android_log()
         self._hook_pthread()
         self._hook_network()
         self._hook_misc()
+        self._patch_plt_got()
 
     def _next_fd(self) -> int:
         """Allocate a new fake file descriptor."""
@@ -211,6 +214,159 @@ class DependencyMocker:
                 except Exception:
                     pass
             self.hook_manager.register_hook(name, handler, "dependency")
+
+    def _hook_libc_mem(self) -> None:
+        """Hook malloc/free/memcpy/memset so unlinked SOs can run."""
+        ql = self.ql
+        _heap_next: list[int] = [0x80000000]  # heap base for fake allocations
+
+        def _on_malloc(ql_ref: Any) -> None:
+            size = ql_ref.arch.regs.x0
+            addr = _heap_next[0]
+            _heap_next[0] += (size + 0xF) & ~0xF  # 16-byte aligned
+            # Map the memory region
+            try:
+                ql_ref.mem.map(addr, (size + 0xFFF) & ~0xFFF, info="fake_malloc")
+            except Exception:
+                pass
+            ql_ref.arch.regs.x0 = addr
+
+        def _on_free(ql_ref: Any) -> None:
+            pass  # no-op
+
+        def _on_memcpy(ql_ref: Any) -> None:
+            dst = ql_ref.arch.regs.x0
+            src = ql_ref.arch.regs.x1
+            n = ql_ref.arch.regs.x2
+            try:
+                data = ql_ref.mem.read(src, n)
+                ql_ref.mem.write(dst, bytes(data))
+            except Exception:
+                pass
+            # x0 already holds dst (return value per memcpy spec)
+
+        def _on_memset(ql_ref: Any) -> None:
+            dst = ql_ref.arch.regs.x0
+            val = ql_ref.arch.regs.x1 & 0xFF
+            n = ql_ref.arch.regs.x2
+            try:
+                ql_ref.mem.write(dst, bytes([val]) * n)
+            except Exception:
+                pass
+
+        mem_funcs = {
+            "malloc": _on_malloc, "calloc": _on_malloc,
+            "free": _on_free,
+            "memcpy": _on_memcpy, "memmove": _on_memcpy,
+            "memset": _on_memset,
+        }
+        for name, handler in mem_funcs.items():
+            if hasattr(ql, 'os') and hasattr(ql.os, 'set_api'):
+                try:
+                    ql.os.set_api(name, handler)
+                except Exception:
+                    pass
+            self.hook_manager.register_hook(name, handler, "dependency")
+
+    def _patch_plt_got(self) -> None:
+        """Patch unresolved PLT symbols using a hook_code interceptor.
+
+        Scans the SO's .rela.plt for GOT entries that are zero (unresolved).
+        Collects the PLT entry addresses for each symbol and installs a single
+        hook_code callback that intercepts calls to those PLT entries, runs
+        the registered Python handler, and redirects PC to the caller's return
+        address (LR/x30) to simulate the function returning.
+        """
+        ql = self.ql
+        try:
+            from elftools.elf.elffile import ELFFile
+
+            so_path = ""
+            if ql.loader.images:
+                so_path = ql.loader.images[0].path
+            if not so_path:
+                return
+
+            base = ql.loader.images[0].base
+            plt_addr: dict[int, str] = {}  # runtime PLT addr -> symbol name
+
+            with open(so_path, "rb") as f:
+                elf = ELFFile(f)
+                rela_plt = elf.get_section_by_name(".rela.plt")
+                if rela_plt is None:
+                    return
+                symtab = elf.get_section_by_name(".dynsym")
+                if symtab is None:
+                    return
+                plt_sec = elf.get_section_by_name(".plt")
+                if plt_sec is None:
+                    return
+
+                # Build mapping: GOT offset -> symbol name
+                got_to_sym: dict[int, str] = {}
+                for rel in rela_plt.iter_relocations():
+                    sym = symtab.get_symbol(rel.entry.r_info_sym)
+                    got_to_sym[rel.entry.r_offset] = sym.name
+
+                # Map PLT entries to symbols by matching GOT offsets
+                # PLT layout on aarch64: entry 0 is resolver, entries 1..N are stubs
+                # Each stub loads from its GOT slot and branches.
+                # We reverse-match by scanning PLT code for ADRP+LDR pairs.
+                # Simpler: just map PLT entry index to the relocation order.
+                plt_offset = plt_sec.header.sh_addr
+                plt_entry_size = 16  # standard aarch64 PLT entry size
+                got_offsets = sorted(got_to_sym.keys())
+                for idx, got_off in enumerate(got_offsets, start=1):
+                    entry_addr = base + plt_offset + idx * plt_entry_size
+                    sym_name = got_to_sym[got_off]
+                    plt_addr[entry_addr] = sym_name
+
+            if not plt_addr:
+                return
+
+            # Build reverse map: symbol name -> handler
+            sym_handlers: dict[str, Any] = {}
+            for addr, name in plt_addr.items():
+                handler = self.hook_manager.get_hook(name)
+                if handler is not None:
+                    sym_handlers[name] = handler
+                else:
+                    logger.debug("No handler for unresolved PLT symbol: %s", name)
+
+            if not sym_handlers:
+                return
+
+            # Filter to only PLT entries that have handlers and are unresolved
+            target_addrs = set()
+            for addr, name in plt_addr.items():
+                if name in sym_handlers:
+                    # Check if GOT entry is zero
+                    got_off = [k for k, v in got_to_sym.items() if v == name][0]
+                    got_addr = base + got_off
+                    got_val = int.from_bytes(ql.mem.read(got_addr, 8), "little")
+                    if got_val == 0:
+                        target_addrs.add(addr)
+                        logger.debug("Will intercept PLT: %s at 0x%x", name, addr)
+
+            if not target_addrs:
+                return
+
+            # Install hook_code interceptor
+            def _plt_interceptor(ql_ref: Any, addr: int, size: int) -> None:
+                if addr not in target_addrs:
+                    return
+                name = plt_addr[addr]
+                handler = sym_handlers.get(name)
+                if handler is not None:
+                    handler(ql_ref)
+                    # Redirect PC to return address (simulate function return)
+                    ql_ref.arch.regs.pc = ql_ref.arch.regs.x30
+
+            ql.hook_code(_plt_interceptor)
+            logger.debug("PLT interceptor installed for %d symbols", len(target_addrs))
+
+        except Exception as e:
+            logger.debug("PLT GOT patching failed (non-fatal): %s", e)
 
     def _hook_misc(self) -> None:
         """Hook miscellaneous: getenv, dlopen, dlsym."""

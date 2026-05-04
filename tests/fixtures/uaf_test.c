@@ -1,6 +1,8 @@
 /* CWE-416 test: use-after-free */
 
-#include <stdlib.h>
+/* Declarations for standalone cross-compilation (resolved at runtime by Qiling/rootfs) */
+void* malloc(unsigned long);
+void free(void*);
 
 /* Vulnerable: accesses memory after free */
 int use_after_free(int trigger) {

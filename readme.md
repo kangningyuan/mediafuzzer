@@ -83,7 +83,7 @@ source mediafuzzer-env/bin/activate
 pip install wheel
 # Qiling 需要特定版本的 Capstone 和 Unicorn
 pip install capstone==4.0.2
-pip install unicorn==2.0.1.post1
+pip install unicorn
 pip install qiling
 ```
 

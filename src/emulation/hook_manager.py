@@ -59,3 +59,10 @@ class HookManager:
     def has_hook(self, name: str, category: str) -> bool:
         """Check if a hook is registered."""
         return name in self._hooks.get(category, {})
+
+    def get_hook(self, name: str) -> Any | None:
+        """Return a hook by name across all categories, or None."""
+        for cat in self._hooks:
+            if name in self._hooks[cat]:
+                return self._hooks[cat][name]
+        return None
