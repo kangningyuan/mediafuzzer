@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block title %}Step 2: LLM Filtering{% endblock %}
+{% set step = 'filtering' %}
+
+{% block content %}
+<div class="row">
+  <div class="col-lg-12">
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Step 2: LLM Multimedia Function Filtering</h5>
+        <div id="filter-status-badge" class="badge bg-secondary">Idle</div>
+      </div>
+      <div class="card-body">
+        <div class="row mb-3">
+          <div class="col-md-4">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="skip-llm">
+              <label class="form-check-label" for="skip-llm">Skip LLM (treat all as multimedia)</label>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">Concurrency: <span id="conc-val">4</span></label>
+            <input type="range" class="form-range" id="concurrency" min="1" max="8" value="4"
+                   oninput="document.getElementById('conc-val').textContent=this.value">
+          </div>
+          <div class="col-md-4 text-end">
+            <button id="btn-filter" class="btn btn-primary" onclick="startFiltering()">Start Filtering</button>
+          </div>
+        </div>
+
+        <div id="filter-progress" class="d-none mb-3">
+          <div class="progress mb-2">
+            <div id="filter-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%"></div>
+          </div>
+          <div class="d-flex justify-content-between">
+            <small id="filter-progress-text">0 / 0</small>
+            <small id="filter-multimedia-count">Multimedia: 0</small>
+          </div>
+          <div id="round-indicator" class="mt-1 d-none">
+            <small class="text-muted">Round: <span id="current-round">-</span> / 3 &mdash; <span id="current-symbol">-</span></small>
+          </div>
+        </div>
+
+        <div id="filter-results" class="d-none">
+          <div class="d-flex justify-content-between mb-2">
+            <div>
+              <button class="btn btn-sm btn-outline-success" onclick="selectAllMultimedia()">Select All Multimedia</button>
+              <button class="btn btn-sm btn-outline-secondary" onclick="deselectAll()">Deselect All</button>
+            </div>
+            <button id="btn-confirm" class="btn btn-success" onclick="confirmSelection()">
+              Confirm Selection &amp; Continue
+            </button>
+          </div>
+
+          <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+            <table class="table table-sm table-hover">
+              <thead class="table-light sticky-top">
+                <tr>
+                  <th><input type="checkbox" id="select-all-cb" onchange="toggleAll(this.checked)"></th>
+                  <th>Symbol</th>
+                  <th>Class.Method</th>
+                  <th>Multimedia?</th>
+                  <th>Operation</th>
+                  <th>Format</th>
+                  <th>Confidence</th>
+                </tr>
+              </thead>
+              <tbody id="func-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const allFunctions = [];
+let filterComplete = false;
+
+function startFiltering() {
+  const skipLlm = document.getElementById('skip-llm').checked;
+  const conc = parseInt(document.getElementById('concurrency').value);
+  document.getElementById('btn-filter').disabled = true;
+  document.getElementById('filter-progress').classList.remove('d-none');
+  document.getElementById('filter-status-badge').textContent = 'Running';
+  document.getElementById('filter-status-badge').className = 'badge bg-warning';
+
+  fetch('/api/filter/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({skip_llm: skipLlm, concurrency: conc})
+  }).then(r => r.json());
+
+  if (skipLlm) {
+    loadExistingResults();
+  }
+}
+
+socket.on('llm:round_start', (data) => {
+  document.getElementById('round-indicator').classList.remove('d-none');
+  document.getElementById('current-round').textContent = data.round;
+  document.getElementById('current-symbol').textContent = data.signature;
+});
+
+socket.on('llm:function_done', (data) => {
+  allFunctions.push(data);
+  addFunctionRow(data);
+  updateFilterProgress();
+});
+
+socket.on('llm:progress', (data) => {
+  const pct = data.total > 0 ? Math.round(data.completed / data.total * 100) : 0;
+  document.getElementById('filter-progress-bar').style.width = pct + '%';
+  document.getElementById('filter-progress-text').textContent = data.completed + ' / ' + data.total;
+  document.getElementById('filter-multimedia-count').textContent = 'Multimedia: ' + data.multimedia_count;
+});
+
+socket.on('llm:complete', (data) => {
+  document.getElementById('filter-progress-bar').style.width = '100%';
+  document.getElementById('filter-progress-bar').classList.remove('progress-bar-animated');
+  document.getElementById('filter-status-badge').textContent = 'Complete';
+  document.getElementById('filter-status-badge').className = 'badge bg-success';
+  document.getElementById('filter-results').classList.remove('d-none');
+  filterComplete = true;
+
+  if (allFunctions.length === 0) loadExistingResults();
+
+  selectAllMultimedia();
+  showToast('LLM filtering complete: ' + data.multimedia_count + '/' + data.total + ' multimedia', 'success');
+});
+
+function addFunctionRow(data) {
+  document.getElementById('filter-results').classList.remove('d-none');
+  const tbody = document.getElementById('func-table-body');
+  const tr = document.createElement('tr');
+  const multimedia = data.is_multimedia;
+  tr.className = multimedia ? '' : 'table-secondary';
+  tr.innerHTML = `
+    <td><input type="checkbox" class="func-cb" data-symbol="${data.native_symbol}" ${multimedia ? 'checked' : ''}></td>
+    <td class="text-monospace small">${data.native_symbol}</td>
+    <td class="small">${data.class_name || data.java_full_sig || ''}</td>
+    <td>${multimedia ?
+      '<span class="badge bg-success">Multimedia</span>' :
+      '<span class="badge bg-secondary">Non-media</span>'}</td>
+    <td>${data.operation_type || '-'}</td>
+    <td>${data.file_format || '-'}</td>
+    <td>${data.confidence || '-'}</td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function updateFilterProgress() {
+  const pct = allFunctions.length > 0 ? 100 : 0;
+  // progress is updated via llm:progress events
+}
+
+function selectAllMultimedia() {
+  document.querySelectorAll('.func-cb').forEach(cb => {
+    const row = cb.closest('tr');
+    if (!row.classList.contains('table-secondary')) {
+      cb.checked = true;
+    }
+  });
+}
+
+function deselectAll() {
+  document.querySelectorAll('.func-cb').forEach(cb => cb.checked = false);
+}
+
+function toggleAll(checked) {
+  document.querySelectorAll('.func-cb').forEach(cb => cb.checked = checked);
+}
+
+function confirmSelection() {
+  const selected = [];
+  document.querySelectorAll('.func-cb:checked').forEach(cb => {
+    selected.push(cb.dataset.symbol);
+  });
+  if (selected.length === 0) {
+    showToast('Please select at least one function', 'warning');
+    return;
+  }
+  fetch('/api/filter/confirm', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({selected_symbols: selected})
+  }).then(r => r.json()).then(data => {
+    showToast('Confirmed ' + data.selected_count + ' functions', 'success');
+    window.location.href = '/emulation';
+  });
+}
+
+function loadExistingResults() {
+  fetch('/api/filter/results').then(r => r.json()).then(data => {
+    if (data.functions && data.functions.length > 0) {
+      data.functions.forEach(f => {
+        if (!allFunctions.find(a => a.native_symbol === f.native_symbol)) {
+          allFunctions.push(f);
+          addFunctionRow(f);
+        }
+      });
+      document.getElementById('filter-progress-bar').style.width = '100%';
+      document.getElementById('filter-progress-bar').classList.remove('progress-bar-animated');
+      document.getElementById('filter-status-badge').textContent = 'Complete';
+      document.getElementById('filter-status-badge').className = 'badge bg-success';
+      document.getElementById('filter-results').classList.remove('d-none');
+      filterComplete = true;
+      selectAllMultimedia();
+    }
+  });
+}
+
+// Check if results already exist on page load
+loadExistingResults();
+</script>
+{% endblock %}

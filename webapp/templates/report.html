@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block title %}Step 6: Vulnerability Report{% endblock %}
+{% set step = 'report' %}
+
+{% block content %}
+<div class="row">
+  <div class="col-lg-12">
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Step 6: Vulnerability Report</h5>
+        <div>
+          <button id="btn-generate" class="btn btn-primary btn-sm" onclick="generateReport()">Generate Report</button>
+          <button id="btn-download-md" class="btn btn-outline-secondary btn-sm d-none" onclick="downloadReport('md')">Download .md</button>
+          <button id="btn-download-json" class="btn btn-outline-secondary btn-sm d-none" onclick="downloadReport('json')">Download .json</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <ul class="nav nav-tabs" id="report-tabs">
+          <li class="nav-item">
+            <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-summary">Summary</button>
+          </li>
+          <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-markdown">Markdown</button>
+          </li>
+          <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-json">JSON</button>
+          </li>
+          <li class="nav-item">
+            <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-crashes">Crashes</button>
+          </li>
+        </ul>
+
+        <div class="tab-content mt-3">
+          <div class="tab-pane fade show active" id="tab-summary">
+            <div id="summary-content">
+              <p class="text-muted">Click "Generate Report" to create the vulnerability report.</p>
+            </div>
+          </div>
+          <div class="tab-pane fade" id="tab-markdown">
+            <pre id="md-content" class="bg-light p-3 rounded" style="max-height: 600px; overflow-y: auto; white-space: pre-wrap; word-wrap: break-word;">No report generated yet.</pre>
+          </div>
+          <div class="tab-pane fade" id="tab-json">
+            <pre id="json-content" class="bg-light p-3 rounded" style="max-height: 600px; overflow-y: auto; font-size: 0.85rem;">No report generated yet.</pre>
+          </div>
+          <div class="tab-pane fade" id="tab-crashes">
+            <div id="crashes-content">
+              <p class="text-muted">No crash data available.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let reportData = {};
+
+function generateReport() {
+  document.getElementById('btn-generate').disabled = true;
+  document.getElementById('btn-generate').textContent = 'Generating...';
+
+  fetch('/api/report/generate', {method: 'POST'}).then(r => r.json()).then(data => {
+    if (data.status === 'generating') {
+      showToast('Report generation started', 'info');
+    }
+  });
+}
+
+socket.on('report:ready', (data) => {
+  document.getElementById('btn-generate').disabled = false;
+  document.getElementById('btn-generate').textContent = 'Generate Report';
+  document.getElementById('btn-download-md').classList.remove('d-none');
+  document.getElementById('btn-download-json').classList.remove('d-none');
+  showToast('Report generated!', 'success');
+  loadReport();
+});
+
+function loadReport() {
+  fetch('/api/report/data').then(r => r.json()).then(data => {
+    reportData = data;
+    if (data.markdown) {
+      document.getElementById('md-content').textContent = data.markdown;
+    }
+    if (data.json && Object.keys(data.json).length > 0) {
+      document.getElementById('json-content').textContent = JSON.stringify(data.json, null, 2);
+      renderSummary(data.json);
+      renderCrashes(data.json);
+    }
+  });
+}
+
+function renderSummary(json) {
+  const summary = json.summary || {};
+  const pipeline = json.pipeline || {};
+  let html = '<div class="row">';
+  html += '<div class="col-md-3"><div class="card text-center mb-2"><div class="card-body py-2">';
+  html += '<div class="text-muted small">Total Unique Crashes</div>';
+  html += '<div class="fs-4 fw-bold text-danger">' + (summary.total_unique_crashes || 0) + '</div>';
+  html += '</div></div></div>';
+
+  html += '<div class="col-md-3"><div class="card text-center mb-2"><div class="card-body py-2">';
+  html += '<div class="text-muted small">Total Occurrences</div>';
+  html += '<div class="fs-4 fw-bold">' + (summary.total_occurrences || 0) + '</div>';
+  html += '</div></div></div>';
+
+  html += '<div class="col-md-3"><div class="card text-center mb-2"><div class="card-body py-2">';
+  html += '<div class="text-muted small">Functions Fuzzed</div>';
+  html += '<div class="fs-4 fw-bold">' + (pipeline.fuzzed_count || 0) + '</div>';
+  html += '</div></div></div>';
+
+  html += '<div class="col-md-3"><div class="card text-center mb-2"><div class="card-body py-2">';
+  html += '<div class="text-muted small">Multimedia Functions</div>';
+  html += '<div class="fs-4 fw-bold">' + (pipeline.multimedia_count || 0) + '</div>';
+  html += '</div></div></div>';
+  html += '</div>';
+
+  // Severity breakdown
+  const bySeverity = summary.by_severity || {};
+  if (Object.keys(bySeverity).length > 0) {
+    html += '<h6 class="mt-3">Severity Breakdown</h6><div class="row">';
+    for (const [sev, count] of Object.entries(bySeverity)) {
+      const colors = {critical: 'danger', high: 'warning', medium: 'info', low: 'secondary'};
+      const cls = colors[sev] || 'secondary';
+      html += '<div class="col-auto"><span class="badge bg-' + cls + ' fs-6">' + sev + ': ' + count + '</span></div>';
+    }
+    html += '</div>';
+  }
+
+  // By type
+  const byType = summary.by_type || {};
+  if (Object.keys(byType).length > 0) {
+    html += '<h6 class="mt-3">Crash Types</h6><table class="table table-sm"><thead><tr><th>Type</th><th>Count</th></tr></thead><tbody>';
+    for (const [type, count] of Object.entries(byType)) {
+      html += '<tr><td class="font-monospace">' + type + '</td><td>' + count + '</td></tr>';
+    }
+    html += '</tbody></table>';
+  }
+
+  // Coverage stats from fuzz_results
+  const fuzzResults = json.fuzz_results || [];
+  if (fuzzResults.length > 0) {
+    html += '<h6 class="mt-3">Coverage Statistics</h6><table class="table table-sm"><thead><tr><th>Function</th><th>Runs</th><th>Time</th><th>Coverage</th><th>Crashes</th></tr></thead><tbody>';
+    fuzzResults.forEach(fr => {
+      html += '<tr><td class="font-monospace small">' + (fr.func_sig || '-') + '</td>' +
+        '<td>' + (fr.total_runs || 0) + '</td>' +
+        '<td>' + (fr.total_time ? fr.total_time.toFixed(1) + 's' : '-') + '</td>' +
+        '<td>' + ((fr.coverage_ratio || 0) * 100).toFixed(3) + '%</td>' +
+        '<td>' + (fr.unique_crashes || 0) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  }
+
+  document.getElementById('summary-content').innerHTML = html;
+}
+
+function renderCrashes(json) {
+  const crashes = json.crashes || [];
+  const el = document.getElementById('crashes-content');
+  if (crashes.length === 0) {
+    el.innerHTML = '<p class="text-muted">No crashes recorded.</p>';
+    return;
+  }
+  let html = '<div class="table-responsive"><table class="table table-sm table-hover">';
+  html += '<thead><tr><th>#</th><th>Function</th><th>Type</th><th>Severity</th><th>Occurrences</th><th>Error</th></tr></thead><tbody>';
+  crashes.forEach((c, i) => {
+    const sevColors = {critical: 'danger', high: 'warning', medium: 'info', low: 'secondary'};
+    const cls = sevColors[c.severity] || 'secondary';
+    html += '<tr>' +
+      '<td>' + (i + 1) + '</td>' +
+      '<td class="font-monospace small">' + (c.func_signature || '-') + '</td>' +
+      '<td>' + (c.error_type || '-') + '</td>' +
+      '<td><span class="badge bg-' + cls + '">' + (c.severity || '-') + '</span></td>' +
+      '<td>' + (c.occurrence_count || 1) + '</td>' +
+      '<td class="small">' + (c.error_message || '-') + '</td>' +
+      '</tr>';
+  });
+  html += '</tbody></table></div>';
+  el.innerHTML = html;
+}
+
+function downloadReport(format) {
+  fetch('/api/report/data').then(r => r.json()).then(data => {
+    let content, filename, type;
+    if (format === 'md') {
+      content = data.markdown || '';
+      filename = 'mediafuzzer_report.md';
+      type = 'text/markdown';
+    } else {
+      content = JSON.stringify(data.json, null, 2);
+      filename = 'mediafuzzer_report.json';
+      type = 'application/json';
+    }
+    const blob = new Blob([content], {type: type});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+}
+
+// Auto-load if report already exists
+fetch('/api/report/data').then(r => r.json()).then(data => {
+  if (data.status === 'ready' && (data.markdown || (data.json && Object.keys(data.json).length > 0))) {
+    reportData = data;
+    if (data.markdown) document.getElementById('md-content').textContent = data.markdown;
+    if (data.json && Object.keys(data.json).length > 0) {
+      document.getElementById('json-content').textContent = JSON.stringify(data.json, null, 2);
+      renderSummary(data.json);
+      renderCrashes(data.json);
+      document.getElementById('btn-download-md').classList.remove('d-none');
+      document.getElementById('btn-download-json').classList.remove('d-none');
+    }
+  }
+});
+</script>
+{% endblock %}

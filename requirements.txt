@@ -17,6 +17,10 @@ pyyaml
 jsonschema
 python-dotenv
 
+# Web界面
+flask>=3.0
+flask-socketio>=5.3
+
 # 测试
 pytest
 pytest-cov

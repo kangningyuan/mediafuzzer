@@ -1,0 +1,305 @@
+{% extends "base.html" %}
+{% block title %}Step 4-5: Fuzzing & Memory Safety{% endblock %}
+{% set step = 'fuzzing' %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-body d-flex align-items-center justify-content-between">
+        <div>
+          <h5 class="mb-0">Fuzzing: <span id="current-func" class="font-monospace">-</span></h5>
+          <small id="fuzz-status-text" class="text-muted">Idle</small>
+        </div>
+        <div class="d-flex align-items-center gap-2">
+          <div class="input-group input-group-sm" style="width: 180px">
+            <span class="input-group-text">Max Runs</span>
+            <input type="number" id="max-runs" class="form-control" value="10000" min="1">
+          </div>
+          <div class="input-group input-group-sm" style="width: 150px">
+            <span class="input-group-text">Timeout</span>
+            <input type="number" id="timeout" class="form-control" value="300" min="1">
+            <span class="input-group-text">s</span>
+          </div>
+          <button id="btn-fuzz-start" class="btn btn-success btn-sm" onclick="startFuzzing()">Start Fuzzing</button>
+          <button id="btn-fuzz-stop" class="btn btn-danger btn-sm d-none" onclick="stopFuzzing()">Stop</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row mb-3">
+  <div class="col-lg-3">
+    <div class="card text-center mb-2">
+      <div class="card-body py-2">
+        <div class="text-muted small">Total Runs</div>
+        <div id="stat-runs" class="fs-4 fw-bold">0</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-3">
+    <div class="card text-center mb-2">
+      <div class="card-body py-2">
+        <div class="text-muted small">Coverage</div>
+        <div id="stat-coverage" class="fs-4 fw-bold">0.00%</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-3">
+    <div class="card text-center mb-2">
+      <div class="card-body py-2">
+        <div class="text-muted small">Unique Crashes</div>
+        <div id="stat-crashes" class="fs-4 fw-bold text-danger">0</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-3">
+    <div class="card text-center mb-2">
+      <div class="card-body py-2">
+        <div class="text-muted small">Speed</div>
+        <div id="stat-speed" class="fs-4 fw-bold">0 <small class="text-muted">mut/s</small></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row mb-3">
+  <div class="col-lg-8">
+    <div class="card">
+      <div class="card-header"><h6 class="mb-0">Coverage & Crashes Over Time</h6></div>
+      <div class="card-body">
+        <canvas id="fuzz-chart" height="100"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between">
+        <h6 class="mb-0">Memory Safety</h6>
+        <span id="mem-violation-badge" class="badge bg-success">0 violations</span>
+      </div>
+      <div class="card-body">
+        <div id="mem-violations-list" class="mb-2" style="max-height: 200px; overflow-y: auto;">
+          <small class="text-muted">No violations detected</small>
+        </div>
+        <hr>
+        <h6 class="small">Memory Blocks (recent 20)</h6>
+        <div id="mem-blocks-list" style="max-height: 150px; overflow-y: auto; font-size: 0.8rem;">
+          <small class="text-muted">No memory state available</small>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row mb-3">
+  <div class="col-lg-6">
+    <div class="card">
+      <div class="card-header"><h6 class="mb-0">Coverage Details</h6></div>
+      <div class="card-body">
+        <div class="row">
+          <div class="col-6"><small class="text-muted">Covered Edges</small><div id="stat-edges">0</div></div>
+          <div class="col-6"><small class="text-muted">Corpus Size</small><div id="stat-corpus">0</div></div>
+          <div class="col-6"><small class="text-muted">Memory Errors</small><div id="stat-mem-errors">0</div></div>
+          <div class="col-6"><small class="text-muted">Elapsed Time</small><div id="stat-elapsed">0s</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between">
+        <h6 class="mb-0">Crash Log</h6>
+        <span id="crash-count-badge" class="badge bg-secondary">0</span>
+      </div>
+      <div class="card-body">
+        <div id="crash-list" style="max-height: 150px; overflow-y: auto; font-size: 0.85rem;">
+          <small class="text-muted">No crashes yet</small>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="fuzz-continue" class="d-none mb-3">
+  <a href="/report" class="btn btn-success">Continue to Report &rarr;</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/fuzzing_charts.js') }}"></script>
+<script>
+let fuzzChart = null;
+const chartData = {labels: [], coverage: [], crashes: []};
+let isFuzzing = false;
+
+function initChart() {
+  const ctx = document.getElementById('fuzz-chart').getContext('2d');
+  fuzzChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: 'Coverage %',
+          data: [],
+          borderColor: 'rgba(54, 162, 235, 1)',
+          backgroundColor: 'rgba(54, 162, 235, 0.1)',
+          fill: true,
+          yAxisID: 'y',
+          tension: 0.3,
+        },
+        {
+          label: 'Unique Crashes',
+          data: [],
+          borderColor: 'rgba(255, 99, 132, 1)',
+          backgroundColor: 'rgba(255, 99, 132, 0.1)',
+          fill: true,
+          yAxisID: 'y1',
+          tension: 0.3,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: {mode: 'index', intersect: false},
+      scales: {
+        x: {title: {display: true, text: 'Time (s)'}, ticks: {maxTicksLimit: 20}},
+        y: {type: 'linear', display: true, position: 'left', title: {display: true, text: 'Coverage %'}, min: 0,
+            ticks: {callback: v => (v * 100).toFixed(2) + '%'}},
+        y1: {type: 'linear', display: true, position: 'right', title: {display: true, text: 'Crashes'}, min: 0, grid: {drawOnChartArea: false}},
+      }
+    }
+  });
+}
+
+function startFuzzing() {
+  const maxRuns = parseInt(document.getElementById('max-runs').value) || 10000;
+  const timeout = parseInt(document.getElementById('timeout').value) || 300;
+  document.getElementById('btn-fuzz-start').classList.add('d-none');
+  document.getElementById('btn-fuzz-stop').classList.remove('d-none');
+  document.getElementById('fuzz-status-text').textContent = 'Running...';
+  isFuzzing = true;
+
+  fetch('/api/fuzz/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({max_runs: maxRuns, timeout: timeout})
+  }).then(r => r.json());
+}
+
+function stopFuzzing() {
+  fetch('/api/fuzz/stop', {method: 'POST'}).then(r => r.json());
+  document.getElementById('btn-fuzz-stop').classList.add('d-none');
+  document.getElementById('btn-fuzz-start').classList.remove('d-none');
+  document.getElementById('fuzz-status-text').textContent = 'Stopping...';
+}
+
+socket.on('fuzz:stats', (data) => {
+  document.getElementById('stat-runs').textContent = data.run_count.toLocaleString();
+  document.getElementById('stat-coverage').textContent = (data.coverage_ratio * 100).toFixed(3) + '%';
+  document.getElementById('stat-crashes').textContent = data.unique_crashes;
+  document.getElementById('stat-speed').innerHTML = data.mutations_per_sec + ' <small class="text-muted">mut/s</small>';
+  document.getElementById('stat-edges').textContent = data.covered_edges;
+  document.getElementById('stat-corpus').textContent = data.corpus_size;
+  document.getElementById('stat-mem-errors').textContent = data.memory_errors;
+  document.getElementById('stat-elapsed').textContent = data.elapsed_seconds + 's';
+
+  const pct = data.max_runs > 0 ? Math.round(data.run_count / data.max_runs * 100) : 0;
+  document.getElementById('fuzz-status-text').textContent =
+    'Running: ' + data.run_count + '/' + data.max_runs + ' (' + pct + '%)';
+
+  if (fuzzChart && data.elapsed_seconds > 0) {
+    const label = data.elapsed_seconds + 's';
+    if (chartData.labels.length === 0 || chartData.labels[chartData.labels.length - 1] !== label) {
+      chartData.labels.push(label);
+      chartData.coverage.push(data.coverage_ratio);
+      chartData.crashes.push(data.unique_crashes);
+      fuzzChart.data.labels = chartData.labels;
+      fuzzChart.data.datasets[0].data = chartData.coverage;
+      fuzzChart.data.datasets[1].data = chartData.crashes;
+      fuzzChart.update('none');
+    }
+  }
+});
+
+socket.on('fuzz:crash', (data) => {
+  const list = document.getElementById('crash-list');
+  if (list.querySelector('.text-muted')) list.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'border-bottom py-1';
+  div.innerHTML = '<span class="badge bg-danger me-1">CRASH</span>' +
+    '<span class="font-monospace small">' + data.hash + '</span>' +
+    ' <small class="text-muted">' + data.error_type + ' (' + data.input_size + ' bytes)</small>';
+  list.prepend(div);
+  const badge = document.getElementById('crash-count-badge');
+  const count = parseInt(badge.textContent || '0') + 1;
+  badge.textContent = count;
+  badge.className = 'badge bg-danger';
+  showToast('New crash: ' + data.error_type + ' [' + data.hash + ']', 'danger');
+});
+
+socket.on('memory:violation', (data) => {
+  const list = document.getElementById('mem-violations-list');
+  if (list.querySelector('.text-muted')) list.innerHTML = '';
+  const type = data.type || 'unknown';
+  const severityClass = (type === 'overflow' || type === 'uaf' || type === 'double_free') ? 'bg-danger' : 'bg-warning';
+  const div = document.createElement('div');
+  div.className = 'border-bottom py-1 small';
+  div.innerHTML = '<span class="badge ' + severityClass + ' me-1">' + type + '</span>' +
+    (data.ptr ? '<span class="font-monospace">' + (typeof data.ptr === 'number' ? '0x' + data.ptr.toString(16) : data.ptr) + '</span>' : '') +
+    (data.description ? ' <span class="text-muted">' + data.description + '</span>' : '');
+  list.prepend(div);
+  const badge = document.getElementById('mem-violation-badge');
+  const count = parseInt(badge.textContent || '0') + 1;
+  badge.textContent = count + ' violation' + (count !== 1 ? 's' : '');
+  badge.className = 'badge bg-danger';
+});
+
+socket.on('memory:state', (data) => {
+  const blocksEl = document.getElementById('mem-blocks-list');
+  if (!data.blocks || data.blocks.length === 0) {
+    blocksEl.innerHTML = '<small class="text-muted">No memory blocks</small>';
+    return;
+  }
+  blocksEl.innerHTML = data.blocks.map(b => {
+    const cls = b.freed ? 'text-decoration-line-through text-muted' : '';
+    return '<div class="' + cls + '">tag=' + b.tag + ' ' + b.base_addr + ' size=' + b.size + (b.freed ? ' [FREED]' : '') + '</div>';
+  }).join('');
+});
+
+// Listen for pipeline state changes (fuzzing complete)
+socket.on('pipeline:state', (data) => {
+  if (data.step === 'fuzzing' && data.status === 'complete') {
+    isFuzzing = false;
+    document.getElementById('btn-fuzz-stop').classList.add('d-none');
+    document.getElementById('btn-fuzz-start').classList.remove('d-none');
+    document.getElementById('fuzz-status-text').textContent = 'Complete';
+    document.getElementById('fuzz-continue').classList.remove('d-none');
+    showToast('Fuzzing complete!', 'success');
+  }
+  if (data.step === 'fuzzing' && data.status === 'error') {
+    isFuzzing = false;
+    document.getElementById('btn-fuzz-stop').classList.add('d-none');
+    document.getElementById('btn-fuzz-start').classList.remove('d-none');
+    document.getElementById('fuzz-status-text').textContent = 'Error: ' + data.message;
+  }
+});
+
+// Load the current function symbol
+fetch('/api/emulation/status').then(r => r.json()).then(data => {
+  if (data.func_symbol) {
+    document.getElementById('current-func').textContent = data.func_symbol;
+  }
+});
+
+fetch('/api/pipeline/state').then(r => r.json()).then(data => {
+  if (data.fuzz_status === 'complete' || data.report_status !== 'idle') {
+    document.getElementById('fuzz-continue').classList.remove('d-none');
+  }
+});
+
+initChart();
+</script>
+{% endblock %}

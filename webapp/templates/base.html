@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}MediaFuzzer{% endblock %}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+</head>
+<body>
+  <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="/">MediaFuzzer</a>
+      <div class="navbar-nav">
+        <a class="nav-link step-link {% if step == 'apk' %}active{% endif %}" href="/apk" data-step="apk">
+          <span class="step-badge {% if completed_steps and 'apk' in completed_steps %}completed{% endif %}">1</span> APK
+        </a>
+        <a class="nav-link step-link {% if step == 'filtering' %}active{% endif %}" href="/filtering" data-step="filtering">
+          <span class="step-badge {% if completed_steps and 'filtering' in completed_steps %}completed{% endif %}">2</span> LLM
+        </a>
+        <a class="nav-link step-link {% if step == 'emulation' %}active{% endif %}" href="/emulation" data-step="emulation">
+          <span class="step-badge {% if completed_steps and 'emulation' in completed_steps %}completed{% endif %}">3</span> Emulation
+        </a>
+        <a class="nav-link step-link {% if step == 'fuzzing' %}active{% endif %}" href="/fuzzing" data-step="fuzzing">
+          <span class="step-badge {% if completed_steps and 'fuzzing' in completed_steps %}completed{% endif %}">4</span> Fuzz
+        </a>
+        <a class="nav-link step-link {% if step == 'report' %}active{% endif %}" href="/report" data-step="report">
+          <span class="step-badge {% if completed_steps and 'report' in completed_steps %}completed{% endif %}">6</span> Report
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <div class="container-fluid mt-3">
+    {% block content %}{% endblock %}
+  </div>
+
+  <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.5/dist/socket.io.min.js"></script>
+  <script src="{{ url_for('static', filename='js/socket_client.js') }}"></script>
+  <script>
+    const socket = io();
+    socket.on('connect', () => { console.log('SocketIO connected:', socket.id); });
+    socket.on('pipeline:error', (data) => {
+      showToast('Error: ' + data.message, 'danger');
+    });
+    socket.on('pipeline:state', (data) => {
+      console.log('Pipeline state:', data);
+    });
+    function showToast(message, type) {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = 'toast align-items-center text-bg-' + (type || 'info') + ' border-0';
+      toast.setAttribute('role', 'alert');
+      toast.innerHTML = '<div class="d-flex"><div class="toast-body">' + message + '</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>';
+      container.appendChild(toast);
+      new bootstrap.Toast(toast, {delay: 5000}).show();
+      toast.addEventListener('hidden.bs.toast', () => toast.remove());
+    }
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

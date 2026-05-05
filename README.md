@@ -67,14 +67,35 @@ MediaFuzzer/
 ├── rootfs/
 │   └── arm64_android/               #   Qiling ARM64 模拟 rootfs（2.3MB）
 │       └── system/lib64/{libc.so, libdl.so, linker64}
+├── webapp/                          # Web 交互式界面
+│   ├── app.py                       #   Flask 应用工厂 + 入口
+│   ├── routes.py                    #   HTTP 路由 + JSON API（15 个端点）
+│   ├── socket_events.py             #   SocketIO 事件处理
+│   ├── pipeline_controller.py       #   管线编排（步骤由用户点击触发）
+│   ├── session_state.py             #   会话状态管理
+│   ├── llm_adapter.py               #   LLM 适配器（返回全量函数 + 回调）
+│   ├── fuzz_monitor.py              #   FuzzWorker 实时状态轮询
+│   ├── templates/                   #   Jinja2 模板
+│   │   ├── base.html                #     布局：导航栏步骤指示器、CDN
+│   │   ├── index.html               #     Step 1: APK 选择
+│   │   ├── filtering.html           #     Step 2: LLM 筛选可视化
+│   │   ├── emulation.html           #     Step 3: 模拟执行可视化
+│   │   ├── fuzzing.html             #     Step 4+5: Fuzz + 内存安全仪表盘
+│   │   └── report.html              #     Step 6: 漏洞报告可视化
+│   └── static/
+│       ├── css/main.css
+│       └── js/
+│           ├── socket_client.js     #     SocketIO 客户端辅助
+│           └── fuzzing_charts.js    #     Chart.js 覆盖率/崩溃图表
 ├── docs/                            # 模块设计文档（11 篇）
-├── run_pipeline.py                  # 主流水线入口
+├── run_pipeline.py                  # 主流水线入口（CLI）
+├── run_web.sh                       # Web 界面一键启动脚本
 ├── run_instruction.md               # 详细操作指南
 ├── requirements.txt
 └── .env.example                     # 环境变量模板
 ```
 
-**代码规模**：~4,700 行（src/ 3,352 + config/ 365 + tests/ 744 + tools/ 229）
+**代码规模**：~5,400 行（src/ 3,352 + config/ 365 + tests/ 744 + tools/ 229 + webapp/ ~700）
 
 ---
 
@@ -203,6 +224,27 @@ output/
     └── mediafuzzer_report_<ts>.json        # JSON 报告
 ```
 
+### 4. 运行 Web 界面
+
+除 CLI 模式外，还提供交互式 Web 界面，每个步骤由用户点击触发：
+
+```bash
+bash run_web.sh
+# 浏览器打开 http://localhost:5000
+```
+
+Web 界面功能：
+
+| 步骤 | 页面 | 功能 |
+|------|------|------|
+| Step 1 | APK 选择 | 列出 `./apk/` 下的 APK，点击选择并提取 |
+| Step 2 | LLM 筛选 | 三轮查询实时可视化，展示全部函数（多媒体/非多媒体），用户勾选确认 |
+| Step 3 | 模拟执行 | Qiling 初始化日志、已解析符号表 |
+| Step 4+5 | Fuzz + 内存安全 | 实时统计（运行次数/覆盖率/崩溃/速度）、Chart.js 图表、内存违规检测 |
+| Step 6 | 漏洞报告 | Markdown/JSON/崩溃分页展示，严重度分类，下载报告 |
+
+技术栈：Flask + Flask-SocketIO（threading 模式）、Bootstrap 5.3 + Chart.js 4.x（CDN）、SocketIO 实时推送
+
 ---
 
 ## 模块设计
@@ -245,6 +287,16 @@ output/
 
 - **CrashAggregator**：三维度去重（栈回溯哈希 / 崩溃地址 / 输入哈希），四级严重度分类（critical/high/medium/low）
 - **ReportGenerator**：Markdown + JSON 双格式，FP 链栈回溯，addr2line 符号解析
+
+### Web 界面 (`webapp/`)
+
+- **app.py**：Flask 应用工厂，SocketIO（threading 模式）初始化，存储在 `app.extensions` 供全局访问
+- **routes.py**：6 个页面路由 + 15 个 JSON API 端点，所有操作由用户点击触发
+- **socket_events.py**：SocketIO 连接管理，共享房间 `mediafuzzer` 广播实时事件
+- **pipeline_controller.py**：管线编排核心，通过 `socketio.start_background_task` 在后台线程执行长时任务（APK 提取、LLM 筛选、Fuzzing），实时发射 SocketIO 事件
+- **session_state.py**：内存中会话状态容器，单用户模式，`atexit` 清理资源
+- **llm_adapter.py**：包装 `LLMQuerier`，返回全部函数（含 `is_multimedia=False`），支持每轮回调（`on_round_start` / `on_function_done`）用于实时可视化
+- **fuzz_monitor.py**：独立轮询线程（500ms），读取 `FuzzWorker` 公开属性，发射 `fuzz:stats` / `fuzz:crash` / `memory:violation` / `memory:state` 事件，无需修改 FuzzWorker 内部代码
 
 ---
 
