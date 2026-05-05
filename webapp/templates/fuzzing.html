@@ -3,12 +3,41 @@
 {% set step = 'fuzzing' %}
 
 {% block content %}
+<!-- Batch Progress Header -->
+<div class="row mb-3">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h5 class="mb-0">
+            Batch Fuzzing:
+            <span id="batch-progress-text" class="text-muted">Idle</span>
+          </h5>
+          <div class="d-flex align-items-center gap-2">
+            <button id="btn-batch-stop" class="btn btn-danger btn-sm d-none" onclick="stopBatch()">Stop Batch</button>
+            <a id="btn-continue-report" href="/report" class="btn btn-success btn-sm d-none">Continue to Report &rarr;</a>
+          </div>
+        </div>
+        <div class="progress mb-2" style="height: 24px;">
+          <div id="batch-progress-bar" class="progress-bar progress-bar-striped progress-bar-animated"
+               role="progressbar" style="width: 0%">0%</div>
+        </div>
+        <div class="d-flex justify-content-between">
+          <small id="batch-count-text" class="text-muted">0 / 0 functions</small>
+          <small id="batch-summary-text" class="text-muted">0 crashes, 0 runs</small>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Current Function Live Stats -->
 <div class="row mb-3">
   <div class="col-12">
     <div class="card">
       <div class="card-body d-flex align-items-center justify-content-between">
         <div>
-          <h5 class="mb-0">Fuzzing: <span id="current-func" class="font-monospace">-</span></h5>
+          <h6 class="mb-0">Current: <span id="current-func" class="font-monospace">-</span></h6>
           <small id="fuzz-status-text" class="text-muted">Idle</small>
         </div>
         <div class="d-flex align-items-center gap-2">
@@ -21,14 +50,15 @@
             <input type="number" id="timeout" class="form-control" value="300" min="1">
             <span class="input-group-text">s</span>
           </div>
-          <button id="btn-fuzz-start" class="btn btn-success btn-sm" onclick="startFuzzing()">Start Fuzzing</button>
-          <button id="btn-fuzz-stop" class="btn btn-danger btn-sm d-none" onclick="stopFuzzing()">Stop</button>
+          <button id="btn-single-start" class="btn btn-outline-primary btn-sm" onclick="startSingleFuzzing()">Fuzz Single</button>
+          <button id="btn-single-stop" class="btn btn-danger btn-sm d-none" onclick="stopFuzzing()">Stop</button>
         </div>
       </div>
     </div>
   </div>
 </div>
 
+<!-- Stats Cards -->
 <div class="row mb-3">
   <div class="col-lg-3">
     <div class="card text-center mb-2">
@@ -64,6 +94,7 @@
   </div>
 </div>
 
+<!-- Charts + Memory Safety -->
 <div class="row mb-3">
   <div class="col-lg-8">
     <div class="card">
@@ -93,9 +124,50 @@
   </div>
 </div>
 
+<!-- Batch Results Table + Details -->
 <div class="row mb-3">
-  <div class="col-lg-6">
+  <div class="col-lg-8">
     <div class="card">
+      <div class="card-header d-flex justify-content-between">
+        <h6 class="mb-0">Fuzzing Results</h6>
+        <span id="results-count-badge" class="badge bg-secondary">0 functions</span>
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive" style="max-height: 300px; overflow-y: auto;">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-light sticky-top">
+              <tr>
+                <th>#</th>
+                <th>Symbol</th>
+                <th>Runs</th>
+                <th>Coverage</th>
+                <th>Crashes</th>
+                <th>Mem Errors</th>
+                <th>Time</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="results-table-body">
+              <tr><td colspan="8" class="text-muted text-center">No results yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between">
+        <h6 class="mb-0">Crash Log</h6>
+        <span id="crash-count-badge" class="badge bg-secondary">0</span>
+      </div>
+      <div class="card-body">
+        <div id="crash-list" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem;">
+          <small class="text-muted">No crashes yet</small>
+        </div>
+      </div>
+    </div>
+    <div class="card mt-3">
       <div class="card-header"><h6 class="mb-0">Coverage Details</h6></div>
       <div class="card-body">
         <div class="row">
@@ -107,23 +179,6 @@
       </div>
     </div>
   </div>
-  <div class="col-lg-6">
-    <div class="card">
-      <div class="card-header d-flex justify-content-between">
-        <h6 class="mb-0">Crash Log</h6>
-        <span id="crash-count-badge" class="badge bg-secondary">0</span>
-      </div>
-      <div class="card-body">
-        <div id="crash-list" style="max-height: 150px; overflow-y: auto; font-size: 0.85rem;">
-          <small class="text-muted">No crashes yet</small>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<div id="fuzz-continue" class="d-none mb-3">
-  <a href="/report" class="btn btn-success">Continue to Report &rarr;</a>
 </div>
 {% endblock %}
 
@@ -133,6 +188,8 @@
 let fuzzChart = null;
 const chartData = {labels: [], coverage: [], crashes: []};
 let isFuzzing = false;
+let isBatchRunning = false;
+let batchResults = [];
 
 function initChart() {
   const ctx = document.getElementById('fuzz-chart').getContext('2d');
@@ -174,11 +231,13 @@ function initChart() {
   });
 }
 
-function startFuzzing() {
+// --- Single-function fuzzing ---
+
+function startSingleFuzzing() {
   const maxRuns = parseInt(document.getElementById('max-runs').value) || 10000;
   const timeout = parseInt(document.getElementById('timeout').value) || 300;
-  document.getElementById('btn-fuzz-start').classList.add('d-none');
-  document.getElementById('btn-fuzz-stop').classList.remove('d-none');
+  document.getElementById('btn-single-start').classList.add('d-none');
+  document.getElementById('btn-single-stop').classList.remove('d-none');
   document.getElementById('fuzz-status-text').textContent = 'Running...';
   isFuzzing = true;
 
@@ -191,10 +250,118 @@ function startFuzzing() {
 
 function stopFuzzing() {
   fetch('/api/fuzz/stop', {method: 'POST'}).then(r => r.json());
-  document.getElementById('btn-fuzz-stop').classList.add('d-none');
-  document.getElementById('btn-fuzz-start').classList.remove('d-none');
+  document.getElementById('btn-single-stop').classList.add('d-none');
+  document.getElementById('btn-single-start').classList.remove('d-none');
   document.getElementById('fuzz-status-text').textContent = 'Stopping...';
+  if (isBatchRunning) {
+    isBatchRunning = false;
+    document.getElementById('btn-batch-stop').classList.add('d-none');
+  }
 }
+
+function stopBatch() {
+  stopFuzzing();
+}
+
+// --- Batch progress helpers ---
+
+function updateBatchProgress(completed, total) {
+  const pct = total > 0 ? Math.round(completed / total * 100) : 0;
+  document.getElementById('batch-progress-bar').style.width = pct + '%';
+  document.getElementById('batch-progress-bar').textContent = pct + '%';
+  document.getElementById('batch-count-text').textContent = completed + ' / ' + total + ' functions';
+}
+
+function addResultRow(index, symbol, data) {
+  const tbody = document.getElementById('results-table-body');
+  if (tbody.querySelector('.text-muted')) tbody.innerHTML = '';
+
+  const tr = document.createElement('tr');
+  const statusCls = data.status === 'complete' ? 'bg-success' : 'bg-danger';
+  tr.innerHTML = `
+    <td>${index + 1}</td>
+    <td class="font-monospace small" title="${symbol}">${symbol.length > 40 ? symbol.substring(0, 37) + '...' : symbol}</td>
+    <td>${data.runs.toLocaleString()}</td>
+    <td>${(data.coverage_ratio * 100).toFixed(2)}%</td>
+    <td class="${data.unique_crashes > 0 ? 'text-danger fw-bold' : ''}">${data.unique_crashes}</td>
+    <td>${data.memory_errors}</td>
+    <td>${data.elapsed}s</td>
+    <td><span class="badge ${statusCls}">${data.status}</span></td>
+  `;
+  tbody.appendChild(tr);
+
+  const badge = document.getElementById('results-count-badge');
+  badge.textContent = batchResults.length + ' functions';
+  badge.className = 'badge bg-info';
+}
+
+// --- SocketIO: batch events ---
+
+socket.on('batch:func_start', (data) => {
+  isBatchRunning = true;
+  document.getElementById('btn-batch-stop').classList.remove('d-none');
+  document.getElementById('current-func').textContent = data.symbol;
+  document.getElementById('fuzz-status-text').textContent = 'Fuzzing [' + (data.index + 1) + '/' + data.total + ']';
+  document.getElementById('batch-progress-text').textContent =
+    'Fuzzing ' + (data.index + 1) + ' / ' + data.total;
+
+  // Reset chart for new function
+  chartData.labels = [];
+  chartData.coverage = [];
+  chartData.crashes = [];
+  if (fuzzChart) {
+    fuzzChart.data.labels = [];
+    fuzzChart.data.datasets[0].data = [];
+    fuzzChart.data.datasets[1].data = [];
+    fuzzChart.update('none');
+  }
+
+  // Reset stats display
+  document.getElementById('stat-runs').textContent = '0';
+  document.getElementById('stat-coverage').textContent = '0.00%';
+  document.getElementById('stat-crashes').textContent = '0';
+  document.getElementById('stat-speed').innerHTML = '0 <small class="text-muted">mut/s</small>';
+  document.getElementById('stat-edges').textContent = '0';
+  document.getElementById('stat-corpus').textContent = '0';
+  document.getElementById('stat-mem-errors').textContent = '0';
+  document.getElementById('stat-elapsed').textContent = '0s';
+});
+
+socket.on('batch:func_complete', (data) => {
+  batchResults.push(data);
+  addResultRow(data.index, data.symbol, data);
+  isFuzzing = false;
+  document.getElementById('fuzz-status-text').textContent =
+    'Completed [' + (data.index + 1) + '/' + data.total + ']';
+});
+
+socket.on('batch:progress', (data) => {
+  updateBatchProgress(data.completed, data.total);
+  document.getElementById('batch-summary-text').textContent =
+    data.total_unique_crashes + ' unique crashes, ' + data.total_runs.toLocaleString() + ' total runs';
+});
+
+socket.on('batch:complete', (data) => {
+  isBatchRunning = false;
+  isFuzzing = false;
+  document.getElementById('btn-batch-stop').classList.add('d-none');
+  document.getElementById('btn-continue-report').classList.remove('d-none');
+  document.getElementById('batch-progress-bar').classList.remove('progress-bar-animated');
+  document.getElementById('batch-progress-bar').style.width = '100%';
+  document.getElementById('batch-progress-bar').textContent = '100%';
+  document.getElementById('batch-progress-text').textContent = 'Complete';
+  document.getElementById('fuzz-status-text').textContent = 'Batch complete';
+  document.getElementById('batch-count-text').textContent = data.total + ' / ' + data.total + ' functions';
+  document.getElementById('batch-summary-text').textContent =
+    data.total_unique_crashes + ' unique crashes, ' + data.total_runs.toLocaleString() + ' total runs, ' + data.elapsed + 's';
+
+  const msg = data.stopped_early
+    ? 'Batch stopped early after ' + data.total + ' functions'
+    : 'Batch complete: ' + data.total + ' functions, ' + data.total_unique_crashes + ' unique crashes';
+  showToast(msg, 'success');
+});
+
+// --- SocketIO: real-time fuzz stats (per current function) ---
 
 socket.on('fuzz:stats', (data) => {
   document.getElementById('stat-runs').textContent = data.run_count.toLocaleString();
@@ -206,9 +373,15 @@ socket.on('fuzz:stats', (data) => {
   document.getElementById('stat-mem-errors').textContent = data.memory_errors;
   document.getElementById('stat-elapsed').textContent = data.elapsed_seconds + 's';
 
-  const pct = data.max_runs > 0 ? Math.round(data.run_count / data.max_runs * 100) : 0;
-  document.getElementById('fuzz-status-text').textContent =
-    'Running: ' + data.run_count + '/' + data.max_runs + ' (' + pct + '%)';
+  if (isBatchRunning && data.batch_total > 0) {
+    document.getElementById('fuzz-status-text').textContent =
+      'Fuzzing [' + (data.batch_current_index + 1) + '/' + data.batch_total + ']: ' +
+      data.run_count + ' runs';
+  } else {
+    const pct = data.max_runs > 0 ? Math.round(data.run_count / data.max_runs * 100) : 0;
+    document.getElementById('fuzz-status-text').textContent =
+      'Running: ' + data.run_count + '/' + data.max_runs + ' (' + pct + '%)';
+  }
 
   if (fuzzChart && data.elapsed_seconds > 0) {
     const label = data.elapsed_seconds + 's';
@@ -269,36 +442,66 @@ socket.on('memory:state', (data) => {
   }).join('');
 });
 
-// Listen for pipeline state changes (fuzzing complete)
+// --- Pipeline state listener ---
+
 socket.on('pipeline:state', (data) => {
-  if (data.step === 'fuzzing' && data.status === 'complete') {
+  if (data.step === 'fuzzing' && data.status === 'complete' && !isBatchRunning) {
     isFuzzing = false;
-    document.getElementById('btn-fuzz-stop').classList.add('d-none');
-    document.getElementById('btn-fuzz-start').classList.remove('d-none');
+    document.getElementById('btn-single-stop').classList.add('d-none');
+    document.getElementById('btn-single-start').classList.remove('d-none');
     document.getElementById('fuzz-status-text').textContent = 'Complete';
-    document.getElementById('fuzz-continue').classList.remove('d-none');
+    document.getElementById('btn-continue-report').classList.remove('d-none');
     showToast('Fuzzing complete!', 'success');
   }
   if (data.step === 'fuzzing' && data.status === 'error') {
     isFuzzing = false;
-    document.getElementById('btn-fuzz-stop').classList.add('d-none');
-    document.getElementById('btn-fuzz-start').classList.remove('d-none');
+    document.getElementById('btn-single-stop').classList.add('d-none');
+    document.getElementById('btn-single-start').classList.remove('d-none');
     document.getElementById('fuzz-status-text').textContent = 'Error: ' + data.message;
   }
 });
 
-// Load the current function symbol
-fetch('/api/emulation/status').then(r => r.json()).then(data => {
-  if (data.func_symbol) {
-    document.getElementById('current-func').textContent = data.func_symbol;
-  }
-});
+// --- Page load: recover state ---
 
-fetch('/api/pipeline/state').then(r => r.json()).then(data => {
-  if (data.fuzz_status === 'complete' || data.report_status !== 'idle') {
-    document.getElementById('fuzz-continue').classList.remove('d-none');
-  }
-});
+(function init() {
+  fetch('/api/fuzz/batch/status').then(r => r.json()).then(data => {
+    if (data.batch_status === 'running') {
+      isBatchRunning = true;
+      document.getElementById('btn-batch-stop').classList.remove('d-none');
+      document.getElementById('batch-progress-text').textContent =
+        'Fuzzing ' + (data.batch_current_index + 1) + ' / ' + data.batch_total;
+      updateBatchProgress(data.batch_completed_count, data.batch_total);
+    } else if (data.batch_status === 'complete') {
+      updateBatchProgress(data.batch_total, data.batch_total);
+      document.getElementById('batch-progress-bar').classList.remove('progress-bar-animated');
+      document.getElementById('batch-progress-text').textContent = 'Complete';
+      document.getElementById('btn-continue-report').classList.remove('d-none');
+    }
+
+    // Populate results table from completed functions
+    if (data.results_summary && data.results_summary.length > 0) {
+      const tbody = document.getElementById('results-table-body');
+      tbody.innerHTML = '';
+      data.results_summary.forEach((r, idx) => {
+        batchResults.push(r);
+        addResultRow(idx, r.func_sig, {
+          runs: r.total_runs,
+          unique_crashes: r.unique_crashes,
+          coverage_ratio: r.coverage_ratio,
+          memory_errors: r.memory_errors,
+          elapsed: r.total_time,
+          status: 'complete',
+        });
+      });
+    }
+  });
+
+  fetch('/api/emulation/status').then(r => r.json()).then(data => {
+    if (data.func_symbol) {
+      document.getElementById('current-func').textContent = data.func_symbol;
+    }
+  });
+})();
 
 initChart();
 </script>

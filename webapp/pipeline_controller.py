@@ -204,14 +204,16 @@ class PipelineController:
                             info.confidence,
                         )
                         self._emit("llm:function_done", _serialize_func_info(info))
-                        self._emit(
-                            "llm:progress",
-                            {
-                                "completed": self._llm_completed,
-                                "total": self._llm_total,
-                                "multimedia_count": self._llm_multimedia_count,
-                            },
-                        )
+                        progress_data = {
+                            "completed": self._llm_completed,
+                            "total": self._llm_total,
+                            "multimedia_count": self._llm_multimedia_count,
+                        }
+                        # Include class coverage every 10 functions or near end
+                        if self._llm_completed % 10 == 0 or self._llm_completed == self._llm_total:
+                            coverage = self._compute_class_coverage()
+                            progress_data["class_coverage"] = coverage
+                        self._emit("llm:progress", progress_data)
 
                     all_infos = filter_all_functions(
                         self._flat_signatures,
@@ -228,9 +230,21 @@ class PipelineController:
 
                 self.state.filter_status = "complete"
                 multi_count = sum(1 for f in self.state.all_func_infos if f.get("is_multimedia"))
-                self._emit("llm:complete", {"total": len(self.state.all_func_infos), "multimedia_count": multi_count})
-                self._emit_state("filtering", "complete", f"{multi_count}/{len(self.state.all_func_infos)} multimedia")
-                logger.info("LLM filtering complete: %d/%d multimedia", multi_count, len(self.state.all_func_infos))
+                coverage = self._compute_class_coverage()
+                self.state.class_coverage = coverage
+                self._emit("llm:complete", {
+                    "total": len(self.state.all_func_infos),
+                    "multimedia_count": multi_count,
+                    "class_coverage": coverage,
+                })
+                self._emit_state("filtering", "complete",
+                    f"{multi_count}/{len(self.state.all_func_infos)} multimedia, "
+                    f"class coverage {coverage['coverage_ratio']:.1%}")
+                logger.info(
+                    "LLM filtering complete: %d/%d multimedia, class coverage %.1f%% (%d tagged classes)",
+                    multi_count, len(self.state.all_func_infos),
+                    coverage["coverage_ratio"] * 100, coverage["tagged_class_count"],
+                )
 
             except Exception as e:
                 logger.error("LLM filtering failed: %s", e, exc_info=True)
@@ -239,6 +253,44 @@ class PipelineController:
                 self._emit_state("filtering", "error", str(e))
 
         self.socketio.start_background_task(_run)
+
+    def _compute_class_coverage(self) -> dict:
+        """Compute same-class multimedia coverage.
+
+        A class is "multimedia-tagged" if LLM marks at least one function in it
+        as multimedia. The denominator is ALL functions belonging to those tagged
+        classes, not just the ones LLM identified. This measures how thoroughly
+        LLM covers the multimedia-related classes.
+        """
+        func_infos = self.state.all_func_infos
+        if not func_infos:
+            return {"llm_multimedia": 0, "same_class_total": 0, "coverage_ratio": 0.0,
+                    "tagged_classes": [], "tagged_class_count": 0}
+
+        # Find classes with at least one LLM-identified multimedia function
+        multimedia_classes: set[str] = set()
+        for f in func_infos:
+            if f.get("is_multimedia") and f.get("class_name"):
+                multimedia_classes.add(f["class_name"])
+
+        # Count all functions in those tagged classes
+        same_class_total = 0
+        llm_multimedia = 0
+        for f in func_infos:
+            if f.get("class_name") in multimedia_classes:
+                same_class_total += 1
+            if f.get("is_multimedia"):
+                llm_multimedia += 1
+
+        coverage_ratio = llm_multimedia / same_class_total if same_class_total > 0 else 0.0
+
+        return {
+            "llm_multimedia": llm_multimedia,
+            "same_class_total": same_class_total,
+            "coverage_ratio": round(coverage_ratio, 4),
+            "tagged_classes": sorted(multimedia_classes),
+            "tagged_class_count": len(multimedia_classes),
+        }
 
     def confirm_selection(self, selected_symbols: list[str]) -> int:
         self.state.selected_functions = selected_symbols
@@ -357,7 +409,66 @@ class PipelineController:
             confidence=func_data.get("confidence", 0.5) if func_data else 0.5,
         )
 
+    def _fuzz_single_function(
+        self, func_symbol: str, max_runs: int, timeout: int
+    ) -> FuzzResult | None:
+        """Fuzz a single function. Manages FuzzWorker lifecycle + FuzzMonitor.
+
+        Returns the FuzzResult, or None on error.
+        """
+        try:
+            func_info = self._get_selected_func_info(func_symbol)
+        except ValueError as e:
+            logger.error("Cannot fuzz %s: %s", func_symbol, e)
+            return None
+
+        func_output_dir = os.path.join(
+            self.state.output_dir,
+            "fuzz_results",
+            Path(func_info.jni_signature.so_path).stem,
+            func_info.jni_signature.native_symbol,
+        )
+
+        worker = None
+        try:
+            worker = FuzzWorker(func_info, func_output_dir)
+            worker.setup()
+            self.state.fuzz_worker = worker
+
+            monitor = FuzzMonitor(
+                self.socketio, self.sid, worker, interval=0.5, max_runs=max_runs
+            )
+            monitor.start()
+            self._monitor = monitor
+
+            result = worker.run(max_runs=max_runs, timeout=timeout)
+            self.state.fuzz_result = result
+
+            if worker.memory_checker:
+                violations = worker.memory_checker.get_violations()
+                result.memory_errors.extend(violations)
+                self.state.memory_violations.extend(violations)
+
+            self.state.all_fuzz_results.append(result)
+            return result
+
+        except Exception as e:
+            logger.error("Fuzzing %s failed: %s", func_symbol, e)
+            self._emit("pipeline:error", {"message": f"Fuzzing {func_symbol} failed: {e}"})
+            return None
+        finally:
+            self.state.fuzz_worker = None
+            if self._monitor:
+                self._monitor.stop()
+                self._monitor = None
+            if worker:
+                try:
+                    worker.teardown()
+                except Exception:
+                    pass
+
     def start_fuzzing(self, max_runs: int = 10000, timeout: int = 300) -> None:
+        """Fuzz a single function (backward-compatible entry point)."""
         func_symbol = self.state.current_func_symbol
         if not func_symbol:
             self._emit("pipeline:error", {"message": "No function selected"})
@@ -367,67 +478,151 @@ class PipelineController:
         self.state.fuzz_status = "running"
         self._emit_state("fuzzing", "running", f"Fuzzing {func_symbol}")
 
-        try:
-            func_info = self._get_selected_func_info(func_symbol)
-        except ValueError as e:
-            self._emit("pipeline:error", {"message": str(e)})
+        def _run():
+            result = self._fuzz_single_function(func_symbol, max_runs, timeout)
             self.state.is_fuzzing = False
-            self.state.fuzz_status = "error"
+            self.state.fuzz_status = "complete"
+            runs = result.total_runs if result else 0
+            self._emit_state("fuzzing", "complete", f"Fuzzing complete: {runs} runs")
+
+        self.socketio.start_background_task(_run)
+
+    def start_batch_fuzzing(
+        self, func_symbols: list[str], max_runs: int = 10000, timeout: int = 300
+    ) -> None:
+        """Fuzz multiple functions sequentially."""
+        # Filter out already-completed functions (resume support)
+        completed_syms = set()
+        for r in self.state.all_fuzz_results:
+            if isinstance(r, FuzzResult):
+                completed_syms.add(r.func_sig)
+
+        remaining = [s for s in func_symbols if s not in completed_syms]
+
+        if not remaining:
+            logger.info("All %d functions already completed", len(func_symbols))
+            self.state.batch_status = "complete"
+            self.state.batch_total = len(func_symbols)
+            self.state.batch_completed_count = len(func_symbols)
+            self.state.batch_current_index = -1
+            self._emit("batch:complete", {
+                "total": len(func_symbols),
+                "total_crashes": 0,
+                "total_unique_crashes": 0,
+                "total_runs": 0,
+                "elapsed": 0,
+                "skipped": len(func_symbols),
+            })
             return
 
-        func_output_dir = os.path.join(
-            self.state.output_dir,
-            "fuzz_results",
-            Path(func_info.jni_signature.so_path).stem,
-            func_info.jni_signature.native_symbol,
-        )
+        self.state.batch_functions = remaining
+        self.state.batch_total = len(remaining)
+        self.state.batch_completed_count = len(func_symbols) - len(remaining)
+        self.state.batch_current_index = -1
+        self.state.batch_status = "running"
+        self.state.is_fuzzing = True
+        self.state.fuzz_status = "running"
+
+        # Track how many were already done before this batch started
+        already_done = len(func_symbols) - len(remaining)
+        batch_start = time.monotonic()
+
+        self._emit_state("fuzzing", "running", f"Batch fuzzing: {len(remaining)} functions")
 
         def _run():
-            worker = None
-            try:
-                worker = FuzzWorker(func_info, func_output_dir)
-                worker.setup()
-                self.state.fuzz_worker = worker
+            total_crashes = 0
+            total_unique_crashes = 0
+            total_runs = 0
 
-                monitor = FuzzMonitor(
-                    self.socketio, self.sid, worker, interval=0.5, max_runs=max_runs
+            for idx, func_symbol in enumerate(remaining):
+                # Check if batch was stopped
+                if self.state.batch_status == "stopping":
+                    logger.info("Batch fuzzing stopped by user at %d/%d", idx, len(remaining))
+                    break
+
+                self.state.batch_current_index = idx
+                self.state.current_func_symbol = func_symbol
+
+                so_path = ""
+                for f in self.state.all_func_infos:
+                    if f["native_symbol"] == func_symbol:
+                        so_path = f.get("so_path", "")
+                        break
+
+                self._emit("batch:func_start", {
+                    "index": already_done + idx,
+                    "total": len(func_symbols),
+                    "symbol": func_symbol,
+                    "so_path": so_path,
+                })
+                logger.info(
+                    "Batch [%d/%d] Fuzzing: %s",
+                    already_done + idx + 1, len(func_symbols), func_symbol,
                 )
-                monitor.start()
-                self._monitor = monitor
 
-                result = worker.run(max_runs=max_runs, timeout=timeout)
-                self.state.fuzz_result = result
+                result = self._fuzz_single_function(func_symbol, max_runs, timeout)
 
-                if worker.memory_checker:
-                    violations = worker.memory_checker.get_violations()
-                    result.memory_errors.extend(violations)
-                    self.state.memory_violations = violations
+                if result:
+                    total_crashes += len(result.crashes)
+                    total_unique_crashes += result.unique_crashes
+                    total_runs += result.total_runs
 
-                self.state.all_fuzz_results.append(result)
+                self.state.batch_completed_count += 1
 
-            except Exception as e:
-                logger.error("Fuzzing failed: %s", e)
-                self._emit("pipeline:error", {"message": str(e)})
-            finally:
-                self.state.is_fuzzing = False
-                self.state.fuzz_status = "complete"
-                if self._monitor:
-                    self._monitor.stop()
-                if worker:
-                    try:
-                        worker.teardown()
-                    except Exception:
-                        pass
-                runs = 0
-                if self.state.fuzz_result:
-                    runs = self.state.fuzz_result.total_runs
-                self._emit_state("fuzzing", "complete", f"Fuzzing complete: {runs} runs")
+                self._emit("batch:func_complete", {
+                    "index": already_done + idx,
+                    "total": len(func_symbols),
+                    "symbol": func_symbol,
+                    "runs": result.total_runs if result else 0,
+                    "crashes": len(result.crashes) if result else 0,
+                    "unique_crashes": result.unique_crashes if result else 0,
+                    "coverage_ratio": result.coverage_ratio if result else 0.0,
+                    "elapsed": round(result.total_time, 1) if result else 0,
+                    "memory_errors": len(result.memory_errors) if result else 0,
+                    "status": "complete" if result else "error",
+                })
+                self._emit("batch:progress", {
+                    "completed": self.state.batch_completed_count,
+                    "total": len(func_symbols),
+                    "total_crashes": total_crashes,
+                    "total_unique_crashes": total_unique_crashes,
+                    "total_runs": total_runs,
+                })
+
+            # Batch done
+            was_stopping = self.state.batch_status == "stopping"
+            self.state.batch_status = "complete"
+            self.state.batch_current_index = -1
+            self.state.is_fuzzing = False
+            self.state.fuzz_status = "complete"
+
+            elapsed = round(time.monotonic() - batch_start, 1)
+            self._emit("batch:complete", {
+                "total": len(func_symbols),
+                "total_crashes": total_crashes,
+                "total_unique_crashes": total_unique_crashes,
+                "total_runs": total_runs,
+                "elapsed": elapsed,
+                "stopped_early": was_stopping,
+            })
+            self._emit_state(
+                "fuzzing", "complete",
+                f"Batch complete: {self.state.batch_completed_count}/{len(func_symbols)} functions, "
+                f"{total_unique_crashes} unique crashes",
+            )
+            logger.info(
+                "Batch fuzzing complete: %d/%d functions, %d unique crashes, %.1fs",
+                self.state.batch_completed_count, len(func_symbols),
+                total_unique_crashes, elapsed,
+            )
 
         self.socketio.start_background_task(_run)
 
     def stop_fuzzing(self) -> None:
         if self.state.fuzz_worker and self.state.is_fuzzing:
             self.state.fuzz_worker.stop()
+        if self.state.batch_status == "running":
+            self.state.batch_status = "stopping"
 
     # --- Step 6: Report ---
 

@@ -119,11 +119,14 @@ def filter_start():
 @main_bp.route("/api/filter/results")
 def filter_results():
     session = get_session(_DEFAULT_SID)
+    ctrl = _get_controller()
+    coverage = session.class_coverage or ctrl._compute_class_coverage()
     return jsonify(
         {
             "status": session.filter_status,
             "total": len(session.all_func_infos),
             "multimedia_count": sum(1 for f in session.all_func_infos if f.get("is_multimedia")),
+            "class_coverage": coverage,
             "functions": session.all_func_infos,
         }
     )
@@ -134,12 +137,14 @@ def filter_progress():
     """Return current LLM filtering progress (for page refresh recovery)."""
     session = get_session(_DEFAULT_SID)
     ctrl = _get_controller()
+    coverage = session.class_coverage or ctrl._compute_class_coverage()
     return jsonify(
         {
             "status": session.filter_status,
             "completed": len(session.all_func_infos),
             "total": ctrl._llm_total or len(session.signatures),
             "multimedia_count": sum(1 for f in session.all_func_infos if f.get("is_multimedia")),
+            "class_coverage": coverage if coverage else None,
             "functions": session.all_func_infos,
         }
     )
@@ -196,6 +201,45 @@ def fuzz_start():
     return jsonify({"status": "fuzzing", "message": "Fuzzing started"})
 
 
+@main_bp.route("/api/fuzz/batch", methods=["POST"])
+def fuzz_batch():
+    data = request.get_json(silent=True) or {}
+    func_symbols = data.get("func_symbols", [])
+    max_runs = data.get("max_runs", 10000)
+    timeout = data.get("timeout", 300)
+    if not func_symbols:
+        return jsonify({"error": "func_symbols list is required"}), 400
+    ctrl = _get_controller()
+    ctrl.start_batch_fuzzing(func_symbols, max_runs=max_runs, timeout=timeout)
+    return jsonify({"status": "batch_fuzzing", "message": f"Batch fuzzing started for {len(func_symbols)} functions"})
+
+
+@main_bp.route("/api/fuzz/batch/status")
+def fuzz_batch_status():
+    session = get_session(_DEFAULT_SID)
+    results_summary = []
+    for r in session.all_fuzz_results:
+        if not hasattr(r, "func_sig"):
+            continue
+        results_summary.append({
+            "func_sig": r.func_sig,
+            "total_runs": r.total_runs,
+            "unique_crashes": r.unique_crashes,
+            "crashes": len(r.crashes),
+            "coverage_ratio": r.coverage_ratio,
+            "total_time": round(r.total_time, 1),
+            "memory_errors": len(r.memory_errors),
+        })
+    return jsonify({
+        "batch_status": session.batch_status,
+        "batch_total": session.batch_total,
+        "batch_completed_count": session.batch_completed_count,
+        "batch_current_index": session.batch_current_index,
+        "batch_functions": session.batch_functions,
+        "results_summary": results_summary,
+    })
+
+
 @main_bp.route("/api/fuzz/stop", methods=["POST"])
 def fuzz_stop():
     ctrl = _get_controller()
@@ -219,6 +263,8 @@ def fuzz_stats():
                 "elapsed_seconds": 0,
                 "memory_errors": 0,
                 "mutations_per_sec": 0,
+                "batch_current_index": session.batch_current_index,
+                "batch_total": session.batch_total,
             }
         )
     w = session.fuzz_worker
@@ -235,6 +281,8 @@ def fuzz_stats():
             "elapsed_seconds": round(r.total_time, 1),
             "memory_errors": len(r.memory_errors),
             "mutations_per_sec": round(r.total_runs / r.total_time, 1) if r.total_time > 0 else 0,
+            "batch_current_index": session.batch_current_index,
+            "batch_total": session.batch_total,
         }
     )
 

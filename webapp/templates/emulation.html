@@ -1,66 +1,62 @@
 {% extends "base.html" %}
-{% block title %}Step 3: Emulation Setup{% endblock %}
+{% block title %}Step 3: Batch Fuzzing Setup{% endblock %}
 {% set step = 'emulation' %}
 
 {% block content %}
 <div class="row">
-  <div class="col-lg-6">
+  <div class="col-lg-12">
     <div class="card mb-3">
-      <div class="card-header">
-        <h5 class="mb-0">Step 3: Qiling Emulation Setup</h5>
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Step 3: Batch Fuzzing Configuration</h5>
+        <div id="batch-badge" class="badge bg-secondary">Idle</div>
       </div>
       <div class="card-body">
-        <div class="mb-3">
-          <label class="form-label">Select Function to Emulate</label>
-          <select id="func-select" class="form-select">
-            <option value="">-- Select a function --</option>
-          </select>
-        </div>
-        <div class="mb-3">
-          <label class="form-label">Function Details</label>
-          <div id="func-details" class="card bg-light">
-            <div class="card-body small">
-              <p class="text-muted mb-0">Select a function to see details</p>
+        <div class="row mb-3">
+          <div class="col-md-6">
+            <div class="input-group input-group-sm">
+              <span class="input-group-text">Max Runs per Function</span>
+              <input type="number" id="max-runs" class="form-control" value="10000" min="1">
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="input-group input-group-sm">
+              <span class="input-group-text">Timeout per Function</span>
+              <input type="number" id="timeout" class="form-control" value="300" min="1">
+              <span class="input-group-text">seconds</span>
             </div>
           </div>
         </div>
-        <button id="btn-setup-emu" class="btn btn-primary" onclick="setupEmulation()" disabled>
-          Setup Emulation
-        </button>
-        <div id="emu-status" class="mt-2"></div>
-      </div>
-    </div>
-  </div>
 
-  <div class="col-lg-6">
-    <div class="card mb-3">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <h5 class="mb-0">Emulation Log</h5>
-        <div id="emu-badge" class="badge bg-secondary">Idle</div>
-      </div>
-      <div class="card-body">
-        <div id="emu-log" class="bg-dark text-light p-3 rounded" style="height: 300px; overflow-y: auto; font-family: monospace; font-size: 0.85rem;">
-          <div class="text-muted">Waiting for emulation setup...</div>
+        <div class="d-flex justify-content-between mb-2">
+          <div>
+            <button class="btn btn-sm btn-outline-success" onclick="selectAll()">Select All</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="deselectAll()">Deselect All</button>
+            <small id="selected-count" class="ms-2 text-muted">0 selected</small>
+          </div>
+          <button id="btn-batch-start" class="btn btn-primary" onclick="startBatchFuzzing()" disabled>
+            Start Batch Fuzzing &rarr;
+          </button>
         </div>
-      </div>
-    </div>
 
-    <div class="card">
-      <div class="card-header">
-        <h5 class="mb-0">Resolved Symbols</h5>
-      </div>
-      <div class="card-body">
-        <div id="symbol-table" class="table-responsive" style="max-height: 200px; overflow-y: auto;">
+        <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
           <table class="table table-sm table-hover">
-            <thead><tr><th>Name</th><th>Address</th><th>Size</th></tr></thead>
-            <tbody id="symbol-body"><tr><td colspan="3" class="text-muted text-center">No symbols yet</td></tr></tbody>
+            <thead class="table-light sticky-top">
+              <tr>
+                <th><input type="checkbox" id="select-all-cb" onchange="toggleAll(this.checked)" checked></th>
+                <th>Symbol</th>
+                <th>Class.Method</th>
+                <th>Operation</th>
+                <th>Format</th>
+                <th>Confidence</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="func-table-body">
+              <tr><td colspan="7" class="text-muted text-center">Loading functions...</td></tr>
+            </tbody>
           </table>
         </div>
       </div>
-    </div>
-
-    <div id="emu-continue" class="mt-3 d-none">
-      <a href="/fuzzing" class="btn btn-success">Continue to Fuzzing &rarr;</a>
     </div>
   </div>
 </div>
@@ -69,89 +65,126 @@
 {% block scripts %}
 <script>
 const funcInfos = [];
+const fuzzedSymbols = new Set();
 
 function loadFunctions() {
+  // Load multimedia functions from filter results
   fetch('/api/filter/results').then(r => r.json()).then(data => {
-    const select = document.getElementById('func-select');
-    const selected = data.functions.filter(f => f.is_multimedia);
-    select.innerHTML = '<option value="">-- Select a function (' + selected.length + ' multimedia) --</option>';
-    selected.forEach(f => {
+    const multimedia = data.functions.filter(f => f.is_multimedia);
+    const tbody = document.getElementById('func-table-body');
+    tbody.innerHTML = '';
+
+    if (multimedia.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="text-muted text-center">No multimedia functions found. Complete Step 2 first.</td></tr>';
+      return;
+    }
+
+    multimedia.forEach(f => {
       funcInfos.push(f);
-      const opt = document.createElement('option');
-      opt.value = f.native_symbol;
-      opt.textContent = f.native_symbol;
-      select.appendChild(opt);
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><input type="checkbox" class="func-cb" data-symbol="${f.native_symbol}" checked onchange="updateCount()"></td>
+        <td class="font-monospace small">${f.native_symbol}</td>
+        <td class="small">${f.class_name || f.java_full_sig || ''}</td>
+        <td>${f.operation_type || '-'}</td>
+        <td>${f.file_format || '-'}</td>
+        <td>${f.confidence || '-'}</td>
+        <td id="status-${f.native_symbol}"><span class="badge bg-secondary">Pending</span></td>
+      `;
+      tbody.appendChild(tr);
     });
+
+    // Check which functions are already fuzzed
+    fetch('/api/fuzz/batch/status').then(r => r.json()).then(batchData => {
+      batchData.results_summary.forEach(r => {
+        if (r.func_sig) {
+          fuzzedSymbols.add(r.func_sig);
+          const statusEl = document.getElementById('status-' + r.func_sig);
+          if (statusEl) {
+            statusEl.innerHTML = '<span class="badge bg-success">Done (' + r.unique_crashes + ' crashes)</span>';
+            // Uncheck already-fuzzed functions
+            const cb = document.querySelector(`.func-cb[data-symbol="${r.func_sig}"]`);
+            if (cb) cb.checked = false;
+          }
+        }
+      });
+      updateCount();
+    });
+
+    updateCount();
   });
 }
 
-document.getElementById('func-select').addEventListener('change', function() {
-  const sym = this.value;
-  const btn = document.getElementById('btn-setup-emu');
-  btn.disabled = !sym;
-  const info = funcInfos.find(f => f.native_symbol === sym);
-  const details = document.getElementById('func-details');
-  if (info) {
-    details.innerHTML = `
-      <div class="card-body small">
-        <div class="row">
-          <div class="col-4 text-muted">Symbol:</div><div class="col-8 font-monospace">${info.native_symbol}</div>
-          <div class="col-4 text-muted">SO Path:</div><div class="col-8 font-monospace text-truncate" title="${info.so_path}">${info.so_path}</div>
-          <div class="col-4 text-muted">Operation:</div><div class="col-8">${info.operation_type || '-'}</div>
-          <div class="col-4 text-muted">Format:</div><div class="col-8">${info.file_format || '-'}</div>
-          <div class="col-4 text-muted">Confidence:</div><div class="col-8">${info.confidence || '-'}</div>
-        </div>
-      </div>`;
-  }
-});
-
-function setupEmulation() {
-  const sym = document.getElementById('func-select').value;
-  if (!sym) return;
-  document.getElementById('btn-setup-emu').disabled = true;
-  document.getElementById('emu-badge').textContent = 'Setting Up';
-  document.getElementById('emu-badge').className = 'badge bg-warning';
-  appendLog('Setting up emulation for ' + sym + '...');
-
-  fetch('/api/emulation/setup', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({func_symbol: sym})
-  }).then(r => r.json());
+function updateCount() {
+  const checked = document.querySelectorAll('.func-cb:checked').length;
+  document.getElementById('selected-count').textContent = checked + ' selected';
+  document.getElementById('btn-batch-start').disabled = checked === 0;
 }
 
-socket.on('emulation:setup', (data) => {
-  appendLog('Loading SO: ' + data.so_path);
-});
+function selectAll() {
+  document.querySelectorAll('.func-cb').forEach(cb => {
+    if (!fuzzedSymbols.has(cb.dataset.symbol)) cb.checked = true;
+  });
+  updateCount();
+}
 
-socket.on('emulation:ready', (data) => {
-  appendLog('Emulation ready! Function at ' + data.func_addr);
-  document.getElementById('emu-badge').textContent = 'Ready';
-  document.getElementById('emu-badge').className = 'badge bg-success';
-  document.getElementById('emu-status').innerHTML = '<div class="alert alert-success py-2 mb-0">Emulation ready for ' + data.func_symbol + ' at ' + data.func_addr + '</div>';
-  document.getElementById('emu-continue').classList.remove('d-none');
-  document.getElementById('btn-setup-emu').disabled = false;
-  showToast('Emulation ready: ' + data.func_symbol, 'success');
-});
+function deselectAll() {
+  document.querySelectorAll('.func-cb').forEach(cb => cb.checked = false);
+  updateCount();
+}
 
-socket.on('emulation:symbols', (data) => {
-  const tbody = document.getElementById('symbol-body');
-  if (!data.symbols || data.symbols.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="3" class="text-muted text-center">No symbols resolved</td></tr>';
+function toggleAll(checked) {
+  document.querySelectorAll('.func-cb').forEach(cb => {
+    if (checked && fuzzedSymbols.has(cb.dataset.symbol)) return;
+    cb.checked = checked;
+  });
+  updateCount();
+}
+
+function startBatchFuzzing() {
+  const selected = [];
+  document.querySelectorAll('.func-cb:checked').forEach(cb => {
+    selected.push(cb.dataset.symbol);
+  });
+  if (selected.length === 0) {
+    showToast('Please select at least one function', 'warning');
     return;
   }
-  tbody.innerHTML = data.symbols.map(s => `
-    <tr><td class="font-monospace small">${s.name}</td><td class="font-monospace small">${s.address}</td><td>${s.size}</td></tr>
-  `).join('');
-  appendLog('Resolved ' + data.symbols.length + ' JNI symbols');
+
+  const maxRuns = parseInt(document.getElementById('max-runs').value) || 10000;
+  const timeout = parseInt(document.getElementById('timeout').value) || 300;
+
+  document.getElementById('btn-batch-start').disabled = true;
+  document.getElementById('batch-badge').textContent = 'Starting...';
+  document.getElementById('batch-badge').className = 'badge bg-warning';
+
+  fetch('/api/fuzz/batch', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({func_symbols: selected, max_runs: maxRuns, timeout: timeout})
+  }).then(r => r.json()).then(data => {
+    showToast('Batch fuzzing started for ' + selected.length + ' functions', 'success');
+    // Navigate to fuzzing page to watch progress
+    setTimeout(() => { window.location.href = '/fuzzing'; }, 1000);
+  });
+}
+
+// Listen for batch events while still on this page
+socket.on('batch:func_start', (data) => {
+  const statusEl = document.getElementById('status-' + data.symbol);
+  if (statusEl) {
+    statusEl.innerHTML = '<span class="badge bg-warning">Fuzzing...</span>';
+  }
 });
 
-function appendLog(msg) {
-  const log = document.getElementById('emu-log');
-  const time = new Date().toLocaleTimeString();
-  log.innerHTML += '<div><span class="text-muted">[' + time + ']</span> ' + msg + '</div>';
-  log.scrollTop = log.scrollHeight;
-}
+socket.on('batch:func_complete', (data) => {
+  const statusEl = document.getElementById('status-' + data.symbol);
+  if (statusEl) {
+    const cls = data.status === 'complete' ? 'bg-success' : 'bg-danger';
+    statusEl.innerHTML = `<span class="badge ${cls}">${data.status === 'complete' ? 'Done' : 'Error'} (${data.unique_crashes} crashes)</span>`;
+  }
+  fuzzedSymbols.add(data.symbol);
+});
 
 loadFunctions();
 </script>

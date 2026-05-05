@@ -32,6 +32,7 @@ class SessionState:
     selected_functions: list[str] = field(default_factory=list)
     llm_skip: bool = False
     filter_status: str = "idle"
+    class_coverage: dict = field(default_factory=dict)
 
     # Step 3: Emulation
     current_func_symbol: str = ""
@@ -45,6 +46,13 @@ class SessionState:
     fuzz_result: Any = None
     is_fuzzing: bool = False
     fuzz_status: str = "idle"
+
+    # Batch fuzzing
+    batch_functions: list[str] = field(default_factory=list)
+    batch_current_index: int = -1
+    batch_total: int = 0
+    batch_completed_count: int = 0
+    batch_status: str = "idle"  # idle | running | complete | error | stopping
 
     # Step 5: Memory safety
     memory_violations: list[dict] = field(default_factory=list)
@@ -77,6 +85,10 @@ class SessionState:
             "emulation_ready": self.emulation_ready,
             "fuzz_status": self.fuzz_status,
             "is_fuzzing": self.is_fuzzing,
+            "batch_status": self.batch_status,
+            "batch_total": self.batch_total,
+            "batch_completed_count": self.batch_completed_count,
+            "batch_current_index": self.batch_current_index,
             "report_status": self.report_status,
         }
 

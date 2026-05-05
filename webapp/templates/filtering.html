@@ -36,6 +36,28 @@
             <small id="filter-progress-text">0 / 0</small>
             <small id="filter-multimedia-count">Multimedia: 0</small>
           </div>
+          <div id="class-coverage-row" class="mt-2 d-none">
+            <div class="card bg-light">
+              <div class="card-body py-2 px-3">
+                <div class="d-flex justify-content-between align-items-center">
+                  <div>
+                    <strong>Same-Class Multimedia Coverage</strong>
+                    <small class="text-muted ms-2">
+                      LLM-identified multimedia / all functions in tagged classes
+                    </small>
+                  </div>
+                  <div>
+                    <span id="coverage-ratio" class="fs-5 fw-bold text-primary">-</span>
+                    <small id="coverage-detail" class="text-muted ms-1"></small>
+                  </div>
+                </div>
+                <div class="progress mt-1" style="height: 8px;">
+                  <div id="coverage-progress-bar" class="progress-bar bg-info" style="width: 0%"></div>
+                </div>
+                <small id="coverage-classes" class="text-muted mt-1 d-block"></small>
+              </div>
+            </div>
+          </div>
           <div id="round-indicator" class="mt-1 d-none">
             <small class="text-muted">Round: <span id="current-round">-</span> / 3 &mdash; <span id="current-symbol">-</span></small>
           </div>
@@ -99,6 +121,20 @@ function setProgress(completed, total, multimediaCount) {
   document.getElementById('filter-multimedia-count').textContent = 'Multimedia: ' + multimediaCount;
 }
 
+function updateClassCoverage(coverage) {
+  if (!coverage || !coverage.coverage_ratio) return;
+  document.getElementById('class-coverage-row').classList.remove('d-none');
+  const pct = (coverage.coverage_ratio * 100).toFixed(1);
+  document.getElementById('coverage-ratio').textContent = pct + '%';
+  document.getElementById('coverage-detail').textContent =
+    coverage.llm_multimedia + ' / ' + coverage.same_class_total;
+  document.getElementById('coverage-progress-bar').style.width = pct + '%';
+  const classList = coverage.tagged_classes || [];
+  document.getElementById('coverage-classes').textContent =
+    coverage.tagged_class_count + ' tagged classes: ' +
+    (classList.length <= 5 ? classList.join(', ') : classList.slice(0, 5).join(', ') + ' ...');
+}
+
 // --- Table row management (deduplicated) ---
 
 function addFunctionRow(data) {
@@ -159,7 +195,7 @@ function pollProgress() {
       document.getElementById('btn-filter').disabled = true;
       setBadge('Running', 'bg-warning');
     } else if (data.status === 'complete') {
-      markComplete(data.total, data.multimedia_count);
+      markComplete(data.total, data.multimedia_count, data.class_coverage);
     } else if (data.status === 'error') {
       isFilterRunning = false;
       stopPolling();
@@ -171,7 +207,7 @@ function pollProgress() {
 
 // --- Mark complete ---
 
-function markComplete(total, multimediaCount) {
+function markComplete(total, multimediaCount, coverage) {
   filterComplete = true;
   isFilterRunning = false;
   stopPolling();
@@ -181,6 +217,9 @@ function markComplete(total, multimediaCount) {
   document.getElementById('filter-results').classList.remove('d-none');
   document.getElementById('btn-filter').disabled = false;
   selectAllMultimedia();
+  if (coverage) {
+    updateClassCoverage(coverage);
+  }
   showToast('LLM filtering complete: ' + multimediaCount + '/' + total + ' multimedia', 'success');
 }
 
@@ -218,10 +257,13 @@ socket.on('llm:function_done', (data) => {
 
 socket.on('llm:progress', (data) => {
   setProgress(data.completed, data.total, data.multimedia_count);
+  if (data.class_coverage) {
+    updateClassCoverage(data.class_coverage);
+  }
 });
 
 socket.on('llm:complete', (data) => {
-  markComplete(data.total, data.multimedia_count);
+  markComplete(data.total, data.multimedia_count, data.class_coverage);
 });
 
 // --- SocketIO connection management ---
@@ -289,6 +331,9 @@ function confirmSelection() {
       // Task in progress — load what we have, show progress bar
       loadResultsIntoTable(data.functions);
       setProgress(data.completed, data.total, data.multimedia_count);
+      if (data.class_coverage) {
+        updateClassCoverage(data.class_coverage);
+      }
       document.getElementById('filter-progress').classList.remove('d-none');
       document.getElementById('btn-filter').disabled = true;
       setBadge('Running', 'bg-warning');
@@ -299,7 +344,7 @@ function confirmSelection() {
       }
     } else if (data.status === 'complete') {
       loadResultsIntoTable(data.functions);
-      markComplete(data.total, data.multimedia_count);
+      markComplete(data.total, data.multimedia_count, data.class_coverage);
     }
     // idle / error: leave default UI
   });
