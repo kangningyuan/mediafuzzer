@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -19,6 +20,9 @@ def create_app() -> Flask:
     )
     app.config["SECRET_KEY"] = os.urandom(24).hex()
 
+    # Configure terminal logging for webapp background tasks
+    _setup_logging()
+
     sio = SocketIO(async_mode="threading", cors_allowed_origins="*")
     sio.init_app(app)
     app.extensions["socketio"] = sio
@@ -30,6 +34,24 @@ def create_app() -> Flask:
     register_socket_events(sio)
 
     return app
+
+
+def _setup_logging() -> None:
+    """Configure logging so webapp background tasks output to terminal."""
+    webapp_logger = logging.getLogger("mediafuzzer.webapp")
+    if webapp_logger.handlers:
+        return  # Already configured
+
+    root_logger = logging.getLogger("mediafuzzer")
+    root_logger.setLevel(logging.DEBUG)
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    root_logger.addHandler(console)
 
 
 def get_socketio() -> SocketIO:

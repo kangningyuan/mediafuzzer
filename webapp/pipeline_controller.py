@@ -106,12 +106,14 @@ class PipelineController:
                 output_dir = os.path.join(settings.OUTPUT_BASE_DIR, f"webapp_{timestamp}")
                 os.makedirs(output_dir, exist_ok=True)
                 self.state.output_dir = output_dir
+                logger.info("APK extraction started: %s", apk_path)
 
                 so_cache = os.path.join(output_dir, "so_cache")
                 self._emit("apk:extracting", {"apk_path": apk_path, "progress": "Extracting SO files..."})
 
                 so_files = extract_so_files(apk_path, so_cache)
                 self.state.extracted_sos = so_files
+                logger.info("Extracted %d SO files", len(so_files))
 
                 self._emit("apk:extracting", {"apk_path": apk_path, "progress": "Parsing JNI signatures..."})
 
@@ -121,6 +123,7 @@ class PipelineController:
                     flat.extend(sigs)
                 self._flat_signatures = flat
                 self.state.signatures = [_serialize_signature(s) for s in flat]
+                logger.info("Found %d JNI signatures", len(flat))
 
                 sig_path = os.path.join(output_dir, "jni_signatures.json")
                 with open(sig_path, "w") as f:
@@ -136,9 +139,10 @@ class PipelineController:
                     },
                 )
                 self._emit_state("apk", "complete", f"Extracted {len(flat)} JNI signatures")
+                logger.info("APK extraction complete: %d signatures", len(flat))
 
             except Exception as e:
-                logger.error("APK extraction failed: %s", e)
+                logger.error("APK extraction failed: %s", e, exc_info=True)
                 self.state.apk_status = "error"
                 self._emit("pipeline:error", {"message": str(e)})
                 self._emit_state("apk", "error", str(e))
@@ -163,6 +167,7 @@ class PipelineController:
         def _run():
             try:
                 if skip_llm:
+                    logger.info("Skip-LLM mode: treating all %d functions as multimedia", self._llm_total)
                     all_infos: list[MultimediaFuncInfo] = []
                     for sig in self._flat_signatures:
                         info = MultimediaFuncInfo(
@@ -175,17 +180,29 @@ class PipelineController:
                         all_infos.append(info)
                     self.state.all_func_infos = [_serialize_func_info(i) for i in all_infos]
                 else:
+                    logger.info("LLM filtering started: %d functions, concurrency=%d", self._llm_total, concurrency)
                     querier = LLMQuerier()
                     audit_path = os.path.join(self.state.output_dir, "llm_audit.jsonl")
                     querier.set_audit_path(audit_path)
 
                     def _on_round_start(round_num: int, symbol: str) -> None:
+                        logger.debug("LLM round %d for %s", round_num, symbol)
                         self._emit("llm:round_start", {"round": round_num, "signature": symbol})
 
                     def _on_function_done(info: MultimediaFuncInfo) -> None:
                         self._llm_completed += 1
                         if info.is_multimedia:
                             self._llm_multimedia_count += 1
+                        # Append to session state in real-time so poll API can serve them
+                        self.state.all_func_infos.append(_serialize_func_info(info))
+                        label = "multimedia" if info.is_multimedia else "non-media"
+                        logger.info(
+                            "[%d/%d] %s -> %s (%s, %s, conf=%.1f)",
+                            self._llm_completed, self._llm_total,
+                            info.jni_signature.native_symbol, label,
+                            info.operation_type or "-", info.file_format or "-",
+                            info.confidence,
+                        )
                         self._emit("llm:function_done", _serialize_func_info(info))
                         self._emit(
                             "llm:progress",
@@ -203,7 +220,7 @@ class PipelineController:
                         on_function_done=_on_function_done,
                         on_round_start=_on_round_start,
                     )
-                    self.state.all_func_infos = [_serialize_func_info(i) for i in all_infos]
+                    # all_func_infos already populated incrementally in _on_function_done
 
                 func_path = os.path.join(self.state.output_dir, "multimedia_functions.json")
                 with open(func_path, "w") as f:
@@ -213,9 +230,10 @@ class PipelineController:
                 multi_count = sum(1 for f in self.state.all_func_infos if f.get("is_multimedia"))
                 self._emit("llm:complete", {"total": len(self.state.all_func_infos), "multimedia_count": multi_count})
                 self._emit_state("filtering", "complete", f"{multi_count}/{len(self.state.all_func_infos)} multimedia")
+                logger.info("LLM filtering complete: %d/%d multimedia", multi_count, len(self.state.all_func_infos))
 
             except Exception as e:
-                logger.error("LLM filtering failed: %s", e)
+                logger.error("LLM filtering failed: %s", e, exc_info=True)
                 self.state.filter_status = "error"
                 self._emit("pipeline:error", {"message": str(e)})
                 self._emit_state("filtering", "error", str(e))

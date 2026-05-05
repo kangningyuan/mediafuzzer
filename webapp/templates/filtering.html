@@ -78,61 +78,33 @@
 {% block scripts %}
 <script>
 const allFunctions = [];
+const loadedSymbols = new Set();
 let filterComplete = false;
+let isFilterRunning = false;
+let socketConnected = false;
+let progressPollTimer = null;
 
-function startFiltering() {
-  const skipLlm = document.getElementById('skip-llm').checked;
-  const conc = parseInt(document.getElementById('concurrency').value);
-  document.getElementById('btn-filter').disabled = true;
-  document.getElementById('filter-progress').classList.remove('d-none');
-  document.getElementById('filter-status-badge').textContent = 'Running';
-  document.getElementById('filter-status-badge').className = 'badge bg-warning';
+// --- Badge / progress helpers ---
 
-  fetch('/api/filter/start', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({skip_llm: skipLlm, concurrency: conc})
-  }).then(r => r.json());
-
-  if (skipLlm) {
-    loadExistingResults();
-  }
+function setBadge(text, cls) {
+  const badge = document.getElementById('filter-status-badge');
+  badge.textContent = text;
+  badge.className = 'badge ' + cls;
 }
 
-socket.on('llm:round_start', (data) => {
-  document.getElementById('round-indicator').classList.remove('d-none');
-  document.getElementById('current-round').textContent = data.round;
-  document.getElementById('current-symbol').textContent = data.signature;
-});
-
-socket.on('llm:function_done', (data) => {
-  allFunctions.push(data);
-  addFunctionRow(data);
-  updateFilterProgress();
-});
-
-socket.on('llm:progress', (data) => {
-  const pct = data.total > 0 ? Math.round(data.completed / data.total * 100) : 0;
+function setProgress(completed, total, multimediaCount) {
+  const pct = total > 0 ? Math.round(completed / total * 100) : 0;
   document.getElementById('filter-progress-bar').style.width = pct + '%';
-  document.getElementById('filter-progress-text').textContent = data.completed + ' / ' + data.total;
-  document.getElementById('filter-multimedia-count').textContent = 'Multimedia: ' + data.multimedia_count;
-});
+  document.getElementById('filter-progress-text').textContent = completed + ' / ' + total;
+  document.getElementById('filter-multimedia-count').textContent = 'Multimedia: ' + multimediaCount;
+}
 
-socket.on('llm:complete', (data) => {
-  document.getElementById('filter-progress-bar').style.width = '100%';
-  document.getElementById('filter-progress-bar').classList.remove('progress-bar-animated');
-  document.getElementById('filter-status-badge').textContent = 'Complete';
-  document.getElementById('filter-status-badge').className = 'badge bg-success';
-  document.getElementById('filter-results').classList.remove('d-none');
-  filterComplete = true;
-
-  if (allFunctions.length === 0) loadExistingResults();
-
-  selectAllMultimedia();
-  showToast('LLM filtering complete: ' + data.multimedia_count + '/' + data.total + ' multimedia', 'success');
-});
+// --- Table row management (deduplicated) ---
 
 function addFunctionRow(data) {
+  if (loadedSymbols.has(data.native_symbol)) return;
+  loadedSymbols.add(data.native_symbol);
+
   document.getElementById('filter-results').classList.remove('d-none');
   const tbody = document.getElementById('func-table-body');
   const tr = document.createElement('tr');
@@ -152,10 +124,126 @@ function addFunctionRow(data) {
   tbody.appendChild(tr);
 }
 
-function updateFilterProgress() {
-  const pct = allFunctions.length > 0 ? 100 : 0;
-  // progress is updated via llm:progress events
+function loadResultsIntoTable(functions) {
+  if (!functions) return;
+  functions.forEach(f => {
+    if (!loadedSymbols.has(f.native_symbol)) {
+      allFunctions.push(f);
+      addFunctionRow(f);
+    }
+  });
 }
+
+// --- Polling: only used when SocketIO is disconnected ---
+
+function startPolling() {
+  if (progressPollTimer) return;  // Already polling
+  progressPollTimer = setInterval(pollProgress, 2000);
+}
+
+function stopPolling() {
+  if (progressPollTimer) {
+    clearInterval(progressPollTimer);
+    progressPollTimer = null;
+  }
+}
+
+function pollProgress() {
+  fetch('/api/filter/progress').then(r => r.json()).then(data => {
+    loadResultsIntoTable(data.functions);
+    setProgress(data.completed, data.total, data.multimedia_count);
+
+    if (data.status === 'running') {
+      isFilterRunning = true;
+      document.getElementById('filter-progress').classList.remove('d-none');
+      document.getElementById('btn-filter').disabled = true;
+      setBadge('Running', 'bg-warning');
+    } else if (data.status === 'complete') {
+      markComplete(data.total, data.multimedia_count);
+    } else if (data.status === 'error') {
+      isFilterRunning = false;
+      stopPolling();
+      setBadge('Error', 'bg-danger');
+      document.getElementById('btn-filter').disabled = false;
+    }
+  }).catch(err => console.error('Progress poll error:', err));
+}
+
+// --- Mark complete ---
+
+function markComplete(total, multimediaCount) {
+  filterComplete = true;
+  isFilterRunning = false;
+  stopPolling();
+  document.getElementById('filter-progress-bar').style.width = '100%';
+  document.getElementById('filter-progress-bar').classList.remove('progress-bar-animated');
+  setBadge('Complete', 'bg-success');
+  document.getElementById('filter-results').classList.remove('d-none');
+  document.getElementById('btn-filter').disabled = false;
+  selectAllMultimedia();
+  showToast('LLM filtering complete: ' + multimediaCount + '/' + total + ' multimedia', 'success');
+}
+
+// --- Start filtering ---
+
+function startFiltering() {
+  const skipLlm = document.getElementById('skip-llm').checked;
+  const conc = parseInt(document.getElementById('concurrency').value);
+  document.getElementById('btn-filter').disabled = true;
+  document.getElementById('filter-progress').classList.remove('d-none');
+  setBadge('Running', 'bg-warning');
+  isFilterRunning = true;
+
+  fetch('/api/filter/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({skip_llm: skipLlm, concurrency: conc})
+  }).then(r => r.json());
+}
+
+// --- SocketIO event handlers (primary real-time channel) ---
+
+socket.on('llm:round_start', (data) => {
+  document.getElementById('round-indicator').classList.remove('d-none');
+  document.getElementById('current-round').textContent = data.round;
+  document.getElementById('current-symbol').textContent = data.signature;
+});
+
+socket.on('llm:function_done', (data) => {
+  if (!loadedSymbols.has(data.native_symbol)) {
+    allFunctions.push(data);
+    addFunctionRow(data);
+  }
+});
+
+socket.on('llm:progress', (data) => {
+  setProgress(data.completed, data.total, data.multimedia_count);
+});
+
+socket.on('llm:complete', (data) => {
+  markComplete(data.total, data.multimedia_count);
+});
+
+// --- SocketIO connection management ---
+// Poll only when SocketIO is disconnected; stop polling when connected.
+
+socket.on('connect', () => {
+  socketConnected = true;
+  // If task is running and we just reconnected, stop polling (SocketIO takes over)
+  if (isFilterRunning) {
+    stopPolling();
+  }
+});
+
+socket.on('disconnect', () => {
+  socketConnected = false;
+  // If task is running and SocketIO dropped, switch to polling
+  if (isFilterRunning && !filterComplete) {
+    startPolling();
+  }
+});
+
+// --- Selection helpers ---
 
 function selectAllMultimedia() {
   document.querySelectorAll('.func-cb').forEach(cb => {
@@ -193,27 +281,28 @@ function confirmSelection() {
   });
 }
 
-function loadExistingResults() {
-  fetch('/api/filter/results').then(r => r.json()).then(data => {
-    if (data.functions && data.functions.length > 0) {
-      data.functions.forEach(f => {
-        if (!allFunctions.find(a => a.native_symbol === f.native_symbol)) {
-          allFunctions.push(f);
-          addFunctionRow(f);
-        }
-      });
-      document.getElementById('filter-progress-bar').style.width = '100%';
-      document.getElementById('filter-progress-bar').classList.remove('progress-bar-animated');
-      document.getElementById('filter-status-badge').textContent = 'Complete';
-      document.getElementById('filter-status-badge').className = 'badge bg-success';
-      document.getElementById('filter-results').classList.remove('d-none');
-      filterComplete = true;
-      selectAllMultimedia();
-    }
-  });
-}
+// --- On page load: recover state from server ---
 
-// Check if results already exist on page load
-loadExistingResults();
+(function init() {
+  fetch('/api/filter/progress').then(r => r.json()).then(data => {
+    if (data.status === 'running') {
+      // Task in progress — load what we have, show progress bar
+      loadResultsIntoTable(data.functions);
+      setProgress(data.completed, data.total, data.multimedia_count);
+      document.getElementById('filter-progress').classList.remove('d-none');
+      document.getElementById('btn-filter').disabled = true;
+      setBadge('Running', 'bg-warning');
+      isFilterRunning = true;
+      // Polling starts as fallback; will stop if SocketIO connects and task is running
+      if (!socketConnected) {
+        startPolling();
+      }
+    } else if (data.status === 'complete') {
+      loadResultsIntoTable(data.functions);
+      markComplete(data.total, data.multimedia_count);
+    }
+    // idle / error: leave default UI
+  });
+})();
 </script>
 {% endblock %}

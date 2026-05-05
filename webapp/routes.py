@@ -129,6 +129,22 @@ def filter_results():
     )
 
 
+@main_bp.route("/api/filter/progress")
+def filter_progress():
+    """Return current LLM filtering progress (for page refresh recovery)."""
+    session = get_session(_DEFAULT_SID)
+    ctrl = _get_controller()
+    return jsonify(
+        {
+            "status": session.filter_status,
+            "completed": len(session.all_func_infos),
+            "total": ctrl._llm_total or len(session.signatures),
+            "multimedia_count": sum(1 for f in session.all_func_infos if f.get("is_multimedia")),
+            "functions": session.all_func_infos,
+        }
+    )
+
+
 @main_bp.route("/api/filter/confirm", methods=["POST"])
 def filter_confirm():
     data = request.get_json(silent=True) or {}
